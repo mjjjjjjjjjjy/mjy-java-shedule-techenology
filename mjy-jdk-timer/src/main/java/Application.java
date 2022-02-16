@@ -9,23 +9,16 @@ import java.util.TimerTask;
  */
 public class Application {
     public static void main(String[] args) {
+        //初始化一个timer对象
         Timer timer = new Timer();
+        //创建TimerTask的实例。
         TimerTask myTask = new TimerTask() {
             @Override
             public void run() {
-                System.out.println("执行run方法");
-//                throw new RuntimeException("异常");
+                System.out.println("执行run方法，time="+System.currentTimeMillis()/1000%60+"秒");
             }
         };
-
-        timer.schedule(myTask,1,1000*2);
-
-        TimerTask myTask2 = new TimerTask() {
-            @Override
-            public void run() {
-                System.out.println("执行run方法2");
-            }
-        };
-        timer.schedule(myTask2,1,1000*2);
+        //提交任务，延迟1秒执行，每两秒执行一次
+        timer.schedule(myTask,1000,1000*2);
     }
 }

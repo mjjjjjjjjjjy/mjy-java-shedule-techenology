@@ -9,16 +9,9 @@ import java.util.concurrent.TimeUnit;
  * @Modified By
  */
 public class Application {
-
     public static void main(String[] args) {
         ScheduledExecutorService scheduledExecutorService = Executors.newSingleThreadScheduledExecutor();
-
-        Runnable runnable = new Runnable() {
-            @Override
-            public void run() {
-                System.out.println("执行任务");
-            }
-        };
+        Runnable runnable = ()->{System.out.println("执行任务");};
         scheduledExecutorService.scheduleAtFixedRate(runnable, 0, 1, TimeUnit.SECONDS);
     }
 }

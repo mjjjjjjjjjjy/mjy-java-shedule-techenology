@@ -15,26 +15,28 @@
 
 
 ## 1. Timer
-### 1.1 核心类
+
 java.util.Timer 是JDK自带的任务调度器。实现比较简单。核心类有以下几个类
 
-| 类                     | 功能                          | 说明                                                                                          |
-|-----------------------|-----------------------------|---------------------------------------------------------------------------------------------|
-| java.util.Timer       | 入口类，新增任务并启动调度器              |                                                                                             |
-| java.util.TaskQueue   | 任务队列                        | TimerTask数组保存了待执行的TimerTask对象。近似有序数组，下标越小，nextExecutionTime越接近当前时间                          |
-| java.util.TimerThread | 执行任务的线程，继承了java.lang.Thread | 真正执行任务调度的地方。 核心方法为mainLoop()。                                                               |
-| java.util.TimerTask   | 抽象类，通过实现该类的抽象方法来实现业务逻辑      | TimerTask中有一个核心属性：nextExecutionTime下一个执行时间点。很重要。当  nextExecutionTime 下一个执行时间点<当前时间，将会获得执行机会 |
+| 类                     | 功能                          | 说明                                           |
+|-----------------------|-----------------------------|----------------------------------------------|
+| java.util.Timer       | 入口类，新增任务并启动调度器              |                                              |
+| java.util.TaskQueue   | 任务队列                        | 优先队列，头部节点为最早执行的job                           |
+| java.util.TimerThread | 执行任务的线程，继承了java.lang.Thread | 核心方法为mainLoop()。                             |
+| java.util.TimerTask   | 抽象类，通过实现该类的抽象方法来实现业务逻辑      | TimerTask中有一个核心属性：nextExecutionTime下一个执行时间点。 |
 
 ### 1.1 平衡二叉堆
 Timer中的的队列为优先队列，基本数据结构为平衡二叉堆(balanced binary heap)。因此想要理解Timer，需要对平衡二叉堆进行了解。
-详细可以参考 [【Java基础】JAVA中优先队列详解](https://www.cnblogs.com/satire/p/14919342.html)。摘抄如下：
+详细可以参考  [【Java基础】JAVA中优先队列详解](https://www.cnblogs.com/satire/p/14919342.html) 。 摘抄如下：
 
 #### 1.1.1 基本结构
 平衡二叉堆的定义为：
 >任意一个非叶子节点的权值，都不大于其左右子节点的权值
 
-结构示例如下：
+结构示例如下： 
+
 ![平衡二叉堆的基本接口](./assets/JAVA任务调度技术-平衡二叉堆的基本接口-1644890890679.png)
+
 从图中可以看出，可以通过数组来实现平衡二叉堆。每一个节点的编号，可以使用数组的下标来表示。
 >1. 数组的第一个元素为二叉树的根节点，在所有节点中权值最小。
 >2. 父子节点之间的关系可以用以下算法表示。这个算法很重要。在新增元素或者删除元素的时候，都需要使用到该算法。
@@ -102,10 +104,185 @@ private void siftDown(int k, E x) {
 > [平衡二叉堆数据结构模拟器](https://iacj.github.io/react-datastructer/#/heap)
 
 
-### 1.2 核心执行逻辑
+### 1.2 Timer 核心执行逻辑
+java.util.Timer位于JDK的rt.jar包下。始于jdk1.3。
+
+原始代码如下，只挑选了核心代码展示。
+```java
+public class Timer {
+    // TaskQueue 实现了一个优先队列
+    private final TaskQueue queue = new TaskQueue();
+    // TimerThread继承了Thread。同时组合了TaskQueue。当Timer实例化时。会启动TimerThread实例的的start()方法。启动线程处理定时任务。
+    private final TimerThread thread = new TimerThread(queue);
+    
+    /**
+     * 核心新增定时任务的方法。
+     * @param task 为实现了业务的任务类。
+     * @param time 为下次执行任务的时间。  
+     * @param period  为0时表示不会重复执行。当period !=0时表示会周期性执行
+     */
+    private void sched(TimerTask task, long time, long period) {
+        //以下代码省去了部分校验代码
+        synchronized(queue) {
+            synchronized(task.lock) {
+                task.nextExecutionTime = time;
+                task.period = period;
+                task.state = TimerTask.SCHEDULED;
+            }
+            queue.add(task);
+            if (queue.getMin() == task)
+                //说明加入task之前。队列为空，处于wait状态。需要唤起。
+                queue.notify();
+        }
+    }
+    // 通过调整sched方法time的时间，可以实现延迟多久才开始启动一个新任务。 如
+    
+    //延迟delay毫秒后执行一次任务
+    public void schedule(TimerTask task, long delay) {
+        sched(task, System.currentTimeMillis()+delay, 0);
+    }
+     
+    //延迟delay毫秒，以固定频率执行定时任务。下次的执行时间为当前系统时间(System.currentTimeMillis())+|period|
+    //当发生阻塞时，有可能丢失调度次数
+    public void schedule(TimerTask task, long delay, long period) {
+        sched(task, System.currentTimeMillis()+delay, -period);
+    }
+    //延迟delay毫秒，以固定频率执行定时任务。与schedule不同。下次执行时间为当前本应执行时间(nextExecutionTime)+period
+    //当发生阻塞时，不会丢失调度次数。
+    public void scheduleAtFixedRate(TimerTask task, long delay, long period) {
+        sched(task, System.currentTimeMillis()+delay, period);
+    }
+
+    /**
+     * 构造函数。实际只是启动了TimerThread线程。
+     * @param name
+     * @param isDaemon
+     */
+    public Timer(String name, boolean isDaemon) {
+        thread.setName(name);
+        thread.setDaemon(isDaemon);
+        thread.start();
+    }
+}
+```
+从以上代码可以看到，当实例化Timer时，将会启动一个TimerThread线程。核心代码如下（省略部分代码）：
+
+```java
+
+class TimerThread extends Thread {
+    //标识线程已经启用。当为false时，跳出循环。
+    boolean newTasksMayBeScheduled = true;
+
+    private TaskQueue queue;
+
+    public void run() {
+        try {
+            mainLoop();
+        } finally {
+            // Someone killed this Thread, behave as if Timer cancelled
+            synchronized(queue) {
+                newTasksMayBeScheduled = false;
+                queue.clear();  // Eliminate obsolete references
+            }
+        }
+    }
+
+    /**
+     * The main timer loop.  (See class comment.)
+     */
+    private void mainLoop() {
+        while (true) {
+            try {
+                TimerTask task;
+                boolean taskFired;
+                synchronized(queue) {
+                    // Wait for queue to become non-empty
+                    while (queue.isEmpty() && newTasksMayBeScheduled)
+                        //让出锁，等待新任务加入
+                        queue.wait();
+                    //此时newTasksMayBeScheduled==false 跳出循环。
+                    if (queue.isEmpty())
+                        break; // Queue is empty and will forever remain; die
+
+                    // Queue nonempty; look at first evt and do the right thing
+                    long currentTime, executionTime;
+                    task = queue.getMin();
+                    synchronized(task.lock) {
+                        //判断状态
+                        if (task.state == TimerTask.CANCELLED) {
+                            queue.removeMin();
+                            continue;  // No action required, poll queue again
+                        }
+                        currentTime = System.currentTimeMillis();
+                        //当前task计划的执行时间。
+                        executionTime = task.nextExecutionTime;
+                        if (taskFired = (executionTime<=currentTime)) {
+                            //当前任务的计划执行时间<=当前时间，则允许执行。
+                            if (task.period == 0) { // Non-repeating, remove
+                                //只执行一次的任务，移除。
+                                queue.removeMin();
+                                task.state = TimerTask.EXECUTED;
+                            } else { // Repeating task, reschedule
+                                //修改task的时间为下一个执行时间，并且重新排序。
+                                /**
+                                 * void rescheduleMin(long newTime) {
+                                        queue[1].nextExecutionTime = newTime;
+                                        fixDown(1);
+                                 }
+                                 */
+                                queue.rescheduleMin(
+                                  task.period<0 ? currentTime   - task.period
+                                                : executionTime + task.period);
+                            }
+                        }
+                    }
+                    if (!taskFired) // Task hasn't yet fired; wait
+                        //最近时间执行的任务还未到时间，需要等待。让出锁。
+                        queue.wait(executionTime - currentTime);
+                }
+                if (taskFired)  // Task fired; run it, holding no locks
+                    //执行业务逻辑。这里可以看到是同步执行的。如果业务逻辑耗时较长，会影响后续任务的执行。
+                    task.run();
+            } catch(InterruptedException e) {
+            }
+        }
+    }
+}
+```
+一个简单的示例：
+
+```java
+public class Application {
+    public static void main(String[] args) {
+        //初始化一个timer对象
+        Timer timer = new Timer();
+        //创建TimerTask的实例。
+        TimerTask myTask = new TimerTask() {
+            @Override
+            public void run() {
+                System.out.println("执行run方法，time="+System.currentTimeMillis()/1000%60+"秒");
+            }
+        };
+        //提交任务，延迟1秒执行，每两秒执行一次
+        timer.schedule(myTask,1000,1000*2);
+    }
+}
+```
+结果：
+>执行run方法，time=25秒  
+执行run方法，time=27秒  
+执行run方法，time=29秒  
+执行run方法，time=31秒  
+执行run方法，time=33秒  
+执行run方法，time=35秒  
+执行run方法，time=37秒  
+
+
+### 1.3 Timer 调度示意图
 
 ![](./assets/README-1644819175724.png)
 
+### 1.4 Timer 调度示意图
 
 
 ## 2. ScheduledExecutorService
