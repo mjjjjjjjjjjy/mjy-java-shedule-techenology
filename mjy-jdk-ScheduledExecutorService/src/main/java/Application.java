@@ -11,7 +11,7 @@ import java.util.concurrent.TimeUnit;
 public class Application {
     public static void main(String[] args) {
         ScheduledExecutorService scheduledExecutorService = Executors.newSingleThreadScheduledExecutor();
-        Runnable runnable = ()->{System.out.println("执行任务");};
-        scheduledExecutorService.scheduleAtFixedRate(runnable, 0, 1, TimeUnit.SECONDS);
+        Runnable runnable = ()->{System.out.println("执行run方法，time="+System.currentTimeMillis()/1000%60+"秒");};
+        scheduledExecutorService.scheduleAtFixedRate(runnable, 1, 2, TimeUnit.SECONDS);
     }
 }
