@@ -1,8 +1,7 @@
 <div style="text-align: center;"><span style="font-size: xxx-large" >JAVA 任务调度技术</span></div>
 
- [doc]  
 
-## 前言
+# 前言
 
 在日常开发过程中，我们经常会遇到在某个时间或者周期性执行某段代码的场景。比如定期同步订单，定期更新商品信息，定期发送消息等。这些重复执行的代码段常常抽象为一个任务(Task)。 一个Task的特点如下：
 
@@ -13,29 +12,31 @@
 以下表格列出了部分实现。本文对部分技术的实现进行了介绍。
 
 
-| 技术                                          |         来源         | 使用场景                     | 其他说明                  |
-| ----------------------------------------------- | :---------------------: | ------------------------------ | --------------------------- |
-| java.util.Timer                               |        JDK自带        | 目前比较少使用               | 推荐先看该框架            |
-| java.util.concurrent.ScheduledExecutorService |        JDK自带        | 基于线程池技术               |                           |
-| Spring Task                                   |    Spring-context    | Spring 项目很方便            |                           |
-| XXL-JOB                                       |    国产开源中间件    | 可用于分布式项目调度         |                           |
-| Quartz                                        | OpenSymphony 开源组织 | 一些中间件常常基于Quartz开发 |                           |
-| Elastic-Job                                   |      当当⽹开源      |                              | 需要依赖ZooKeeper + Mesos |
-| Apache DolphinScheduler                       |       易观开源       | 大数据任务调度               |                           |
+| 技术                     |         来源         | 使用场景                     | 其他说明                  |
+| -------------------------- | :---------------------: | ------------------------------ | --------------------------- |
+| Timer                    |        JDK自带        | 目前比较少使用               | 推荐先看该框架            |
+| ScheduledExecutorService |        JDK自带        | 基于线程池技术               |                           |
+| Spring Task              |    Spring-context    | Spring 项目                  |                           |
+| XXL-JOB                  |    国产开源中间件    | 可用于分布式项目调度         |                           |
+| Quartz                   | OpenSymphony 开源组织 | 一些中间件常常基于Quartz开发 |                           |
+| Elastic-Job              |      当当⽹开源      |                              | 需要依赖ZooKeeper + Mesos |
+| Apache DolphinScheduler  |       易观开源       | 大数据任务调度               |                           |
 
-## 1. Timer
+# 1. Timer
 
 java.util.Timer位于JDK的rt.jar包下，始于jdk1.3，是JDK自带的任务调度器，虽然目前基本不再使用Timer来进行任务调度，但是Timer设计简单，理解起来比较容易。而且后续ScheduledExecutorService的基本原理和Timer基本类似，因此需要对Timer进行一个详细的了解。Timer的实现比较简单，只需要以下4个类即可。
 
 
-| 类                    | 功能                                                | 说明                                          |
-| ----------------------- | ----------------------------------------------------- | ----------------------------------------------- |
-| java.util.Timer       | 入口类，整个调度器的组织者                          | 定义了多个提交task的方法                      |
-| java.util.TimerThread | 启动执行任务的线程，继承了java.lang.Thread          | 一个轮询方法，核心方法为mainLoop()。          |
-| java.util.TimerTask   | 抽象类，通过实现该类的抽象方法（run）来实现业务逻辑 | 核心属性：nextExecutionTime下一个执行时间点。 |
-| java.util.TaskQueue   | 任务队列                                            | 优先队列，头部节点为最早执行的Task            |
+| 类          | 功能                                                | 说明                                          |
+| ------------- | ----------------------------------------------------- | ----------------------------------------------- |
+| Timer       | 入口类，整个调度器的组织者                          | 定义了多个提交task的方法                      |
+| TimerThread | 启动执行任务的线程，继承了java.lang.Thread          | 一个轮询方法，核心方法为mainLoop()。          |
+| TimerTask   | 抽象类，通过实现该类的抽象方法（run）来实现业务逻辑 | 核心属性：nextExecutionTime下一个执行时间点。 |
+| TaskQueue   | 任务队列                                            | 优先队列，头部节点为最早执行的Task            |
 
-### 1.1 存储任务的数据结构-平衡二叉堆
+以上类都处于java.util包下。
+
+## 1.1 存储任务的数据结构-平衡二叉堆
 
 一个任务框架，需要可以容纳在不同时间执行的任务，因此必须要有一个容器来缓存或者持久化提交的任务。 那么在多任务的场景下，我们如何挑选出需要执行的任务呢？以下对一些场景进行分析：
 
@@ -54,7 +55,7 @@ java.util.Timer位于JDK的rt.jar包下，始于jdk1.3，是JDK自带的任务�
 从以上分析可以看出，一个任务框架，如果每次只去最早执行的一个任务来执行，可以采用优先队列。Timer也是如此，基本数据结构为平衡二叉堆(balanced binary heap)。因此想要理解Timer，需要对平衡二叉堆进行了解。
 详细可以参考  [【Java基础】JAVA中优先队列详解](https://www.cnblogs.com/satire/p/14919342.html) 。 摘抄如下：
 
-#### 1.1.1 基本结构
+### 1.1.1 基本结构
 
 Java平衡二叉堆的定义为：
 
@@ -80,7 +81,7 @@ Java平衡二叉堆的定义为：
 
 在优先队列中，一般只使用到新增元素和删除根节点元素，因此只对这两个算法进行介绍。
 
-#### 1.1.2 新增元素
+### 1.1.2 新增元素
 
 ![平衡二叉堆新增元素](./assets/JAVA任务调度技术-平衡二叉堆新增元素-1644891408924.png)
 步骤如下:
@@ -106,7 +107,7 @@ private void siftUp(int k, E x) {
 
 通过以上步骤。可以保证所有的父节点权值都小于子节点的权值。
 
-#### 1.1.3 删除队首元素
+### 1.1.3 删除队首元素
 
 ![平衡二叉堆删除元素](./assets/JAVA任务调度技术-平衡二叉堆删除元素-1644891999890.png)
 步骤如下：
@@ -137,7 +138,7 @@ private void siftDown(int k, E x) {
 }
 ```
 
-### 1.2 Timer 核心执行逻辑
+## 1.2 Timer 核心执行逻辑
 
 Timer 提交任务的方法有6个
 
@@ -158,14 +159,14 @@ delay： 延迟毫秒数period： 时间间隔
 需要特别说明的是2和3，5和6之间的区别，也就是schedule和scheduleAtFixedRate的区别。具体看下表：
 
 
-| 方法名              | 下一个执行时间nextExecutionTime | 说明                                                                                       |
-| --------------------- | --------------------------------- | -------------------------------------------------------------------------------------------- |
-| schedule            | currentTime + delay             | 当前序堵塞时，影响到后续任务的下次计划时间，下次任务会推迟执行，对于丢失的时间不会补上任务 |
-| scheduleAtFixedRate | nextExecutionTime + delay       | 当堵塞时，影响到后续任务的计划时间，任务的次数不会丢失，快速补上调度次数                   |
+| 方法名              | 下一个执行时间nextExecutionTime | 说明                                                                                             |
+| --------------------- | --------------------------------- | -------------------------------------------------------------------------------------------------- |
+| schedule            | currentTime + delay             | 当前序堵塞时，会影响到后续任务的下次计划时间，<br>下次任务会推迟执行，对于丢失的时间不会补上任务 |
+| scheduleAtFixedRate | nextExecutionTime + delay       | 当堵塞时，影响到后续任务的计划时间，<br>任务的次数不会丢失，快速补上调度次数                     |
 
 注： currentTime：当前时间，nextExecutionTime：下次执行时间，delay：时间间隔
 
-#### 1.2.1 Timer简单的例子：
+### 1.2.1 Timer简单的例子：
 
 ```java
 public class Application {
@@ -197,7 +198,7 @@ public class Application {
 
 原始代码分析如下，只挑选了核心代码展示。
 
-#### 1.2.2 Timer 类源码分析
+### 1.2.2 Timer 类源码分析
 
 Timer 是整个任务架构的组织者，也是入口，因此首先看Timer的代码。
 
@@ -258,7 +259,7 @@ public class Timer {
 }
 ```
 
-#### 1.2.3  TaskQueue 类源码分析
+### 1.2.3  TaskQueue 类源码分析
 
 TaskQueue 本质是一个平衡二叉堆，1.1已经有所介绍。
 
@@ -319,7 +320,7 @@ class TaskQueue {
 }
 ```
 
-#### 1.2.3 TimerThread 类源码分析
+### 1.2.3 TimerThread 类源码分析
 
 从Timer代码可以看到，当实例化Timer时，将会启动一个TimerThread线程，具体作用是不断轮询队列的头部元素，然后执行业务代码。核心代码如下（省略部分代码）：
 
@@ -362,7 +363,7 @@ class TimerThread extends Thread {
                             queue.removeMin();
                             continue;  
                         }
-          
+        
                         currentTime = System.currentTimeMillis();
                         //当前task计划的执行时间。
                         executionTime = task.nextExecutionTime;
@@ -396,7 +397,7 @@ class TimerThread extends Thread {
 
 TimerThread 中的 mainLoop 方法+TaskQueue队列，看起来非常熟悉，在queue为空的时候，会调用queue.wait()方法。直到Timer在新增元素时，调用了queue.notify()。这些代码和BlockQueue非常像。
 
-#### 1.2.4 TimerTask 类源码分析
+### 1.2.4 TimerTask 类源码分析
 
 ```java
 public abstract class TimerTask implements Runnable {
@@ -412,13 +413,13 @@ public abstract class TimerTask implements Runnable {
 }
 ```
 
-### 1.3 Timer 调度示意图
+## 1.3 Timer 调度示意图
 
 通过对Timer的四个核心类，我们可以得出以下调度示意图。
 
 ![](./assets/README-1644819175724.png)
 
-### 1.4 Timer 总结
+## 1.4 Timer 总结
 
 可以看到，Timer 是JDK自带的任务调度器。实现的逻辑如下
 
@@ -433,7 +434,7 @@ public abstract class TimerTask implements Runnable {
 
 基于以上局限性，在实际应用中，使用Timer使用得并不多。常用的为 ScheduledExecutorService。ScheduledExecutorService与Timer 的最大区别是将任务提交给线程池处理。
 
-## 2. ScheduledExecutorService
+# 2. ScheduledExecutorService
 
 在前一章节可以了解到，在 Timer 类中所有的任务都是同步执行，如果前序任务发生了阻塞或者耗时比较长，那么后续任务就容易被阻塞到。
 
@@ -457,15 +458,17 @@ ScheduledThreadPoolExecutor 在实现上与Timer是相似的，都是通过实�
 ScheduledExecutorService 的一些核心类如下：
 
 
-| 类                                                                   | 功能                             | 说明                                                 |
-| ---------------------------------------------------------------------- | ---------------------------------- | ------------------------------------------------------ |
-| java.util.concurrent.ScheduledExecutorService                        | 抽象类，定义了提交任务的抽象方法 |                                                      |
-| java.util.concurrent.Executors.DelegatedScheduledExecutorService     | 包装类                           | 用于包装 ScheduledThreadPoolExecutor，只暴露关键方法 |
-| java.util.concurrent.ScheduledThreadPoolExecutor                     | 核心执行器                       |                                                      |
-| java.util.concurrent.ScheduledThreadPoolExecutor.DelayedWorkQueue    | 延迟阻塞队列                     | 任务周期执行的核心方法在这个类中实现                 |
-| java.util.concurrent.ScheduledThreadPoolExecutor.ScheduledFutureTask | 队列中的对象                     | 说明                                                 |
+| 类                                              | 功能                             | 说明                                                     |
+| ------------------------------------------------- | ---------------------------------- | ---------------------------------------------------------- |
+| ScheduledExecutorService                        | 抽象类，定义了提交任务的抽象方法 |                                                          |
+| Executors.DelegatedScheduledExecutorService     | 包装类                           | 用于包装 ScheduledThreadPoolExecutor，<br>只暴露关键方法 |
+| ScheduledThreadPoolExecutor                     | 核心执行器                       |                                                          |
+| ScheduledThreadPoolExecutor.DelayedWorkQueue    | 延迟阻塞队列                     | 任务周期执行的核心方法在这个类中实现                     |
+| ScheduledThreadPoolExecutor.ScheduledFutureTask | 队列中的对象                     | 说明                                                     |
 
-### 2.1 ScheduledExecutorService 的简单用法和介绍
+以上类处于java.util.concurrent包下
+
+## 2.1 ScheduledExecutorService 的简单用法和介绍
 
 ```java
 public class Application {
@@ -496,7 +499,7 @@ public interface ScheduledExecutorService extends ExecutorService {
 }
 ```
 
-### 2.2 ScheduledThreadPoolExecutor 类
+## 2.2 ScheduledThreadPoolExecutor 类
 
 ScheduledExecutorService只定义了相应的规范，还需要具体类进行实现。
 
@@ -556,7 +559,7 @@ public class ScheduledThreadPoolExecutor
 
 到这时ScheduledExecutorService的秘密浮出水面，核心在于 DelayedWorkQueue。
 
-### 2.3 DelayedWorkQueue 类实现
+## 2.3 DelayedWorkQueue 类实现
 
 DelayedWorkQueue 类的定义如下。可以看到，DelayedWorkQueue的实现了BlockingQueue接口，可以传入JDK的线程池进行消费。
 
@@ -615,7 +618,7 @@ static class DelayedWorkQueue extends AbstractQueue<Runnable> implements Blockin
                   // 4 删除队列的第一个个元素并重新向下排序。返回任务
                   return finishPoll(first);
                }
-             
+           
                first = null; // don't retain ref while waiting  等待时去除引用
                if (leader != null)
                   available.await();
@@ -663,7 +666,7 @@ static class DelayedWorkQueue extends AbstractQueue<Runnable> implements Blockin
 }
 ```
 
-### 2.4 ScheduledFutureTask 类
+## 2.4 ScheduledFutureTask 类
 
 从上一节DelayedWorkQueue类中的take方法和finishPoll方法可知，在线程池获取task后，已经从队列中移走，那么对于重复执行的队列怎么办呢？那就是在线程池执行run方法前，重新将task加到队列中。
 
@@ -720,7 +723,7 @@ public class ScheduledThreadPoolExecutor
 
 ```
 
-### 2.5 ScheduledExecutorService 总结
+## 2.5 ScheduledExecutorService 总结
 
 通过分析源码可以看出，ScheduledExecutorService  是通过实现一个优先队列来存储和调度任务的。从原理上来说是和Timer是类似的。可以认为是Timer 的升级版，新增了线程池执行任务的功能。
 
@@ -729,16 +732,16 @@ ScheduledExecutorService 和 Timer 比较
 
 |           框架           | 相同                 | 不同                                                                                                                              |
 | :------------------------: | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-|          Timer          | 都使用堆作为数据结构 | 1、同步执行任务<br>    2、从队列头部获取任务之后，直接修改下次执行时间，直接排序                                                  |
+|          Timer          | 都使用堆作为数据结构 | 1、同步执行任务<br> <br>2、从队列头部获取任务之后，直接修改下次执行时间，直接排序                                                |
 | ScheduledExecutorService |                      | 1、线程池异步执行任务<br>      2、从头部获取任务后，移除当前任务 ，排序一次。在执行任务前修改时间后，再提交到队列。相当于排序两次 |
 
 但是ScheduledExecutorService也有一定的局限性，那就是任务只能执行一次或者以固定的时间差周期性执行。不够灵活。
 
-## 3 Spring Task
+# 3 Spring Task
 
 Spring Task处于spring-context项目的org.springframework.scheduling包下。可以通过注解的方式，将Spring bean中的某个方法变成一个task，非常方便。而且引入了cron表达式，使用更加灵活。
 
-### 3.1 Spring Task 简单用法
+## 3.1 Spring Task 简单用法
 
 新建一个maven项目，引入spring-context包
 
@@ -776,19 +779,21 @@ public class Application {
 
 从以上demo中可以看出，在spring中，只需要两个注解@EnableScheduling和@Scheduled，就可以启动一个定时任务了，非常方便。
 
-### 3.2 Spring Task核心类
+## 3.2 Spring Task核心类
 
 
-| 类                                                                                  | 功能                 | 说明                                                         |
-| ------------------------------------------------------------------------------------- | ---------------------- | -------------------------------------------------------------- |
-| org.springframework.scheduling.annotation.Scheduled                                 | 注解类               | 将一个方法标记为定时执行的task，提供了多种配置触发时间的方式 |
-| org.springframework.scheduling.annotation.ScheduledAnnotationBeanPostProcessor      | 后置处理器           | 解析所有被Scheduled标识的方法处理成的task，并做相关配置      |
-| org.springframework.scheduling.config.ScheduledTaskRegistrar                        | 任务注册中心         | 缓存了task和任务处理器                                       |
-| org.springframework.scheduling.concurrent.ConcurrentTaskScheduler                   | 默认调度器           | 内置了ScheduledExecutorService                               |
-| org.springframework.scheduling.concurrent.ReschedulingRunnable.ReschedulingRunnable | cron表达式Task适配器 | 对于使用了Trigger的Task，将使用ReschedulingRunnable重新封装  |
-| org.springframework.scheduling.Trigger                                              | 触发器               | 对于cron表达式的task，有用到                                 |
+| 类                                   | 功能                 | 说明                                                         |
+| -------------------------------------- | ---------------------- | -------------------------------------------------------------- |
+| Scheduled                            | 注解类               | 将一个方法标记为定时执行的task，提供了多种配置触发时间的方式 |
+| ScheduledAnnotationBeanPostProcessor | 后置处理器           | 解析所有被Scheduled标识的方法处理成的task，并做相关配置      |
+| ScheduledTaskRegistrar               | 任务注册中心         | 缓存了task和任务处理器                                       |
+| ConcurrentTaskScheduler              | 默认调度器           | 内置了ScheduledExecutorService                               |
+| ReschedulingRunnable                 | cron表达式Task适配器 | 对于使用了Trigger的Task，将使用ReschedulingRunnable重新封装  |
+| Trigger                              | 触发器               | 对于cron表达式的task，有用到                                 |
 
-### 3.3 Scheduled 注解
+以上类都处于org.springframework.scheduling包下。
+
+## 3.3 Scheduled 注解
 
 首先看一下Scheduled的代码，看提供了哪些工鞥呢。
 
@@ -811,7 +816,7 @@ public @interface Scheduled {
 
 Scheduled 中包含了任务调度的相关配置。 相比较ScheduledExecutorService，多了cron表达式。在任务的控制上更加灵活，不再局限于固定重复周期。
 
-### 3.4 ScheduledAnnotationBeanPostProcessor 类
+## 3.4 ScheduledAnnotationBeanPostProcessor 类
 
 spring-task需要@EnableScheduling开启注解，查看其定义：
 
@@ -930,7 +935,7 @@ public class ScheduledAnnotationBeanPostProcessor
 > 2、从容器中查找 TaskScheduler。
 > 3、将1和2都存到ScheduledTaskRegistrar。
 
-### 3.5 ScheduledTaskRegistrar 类
+## 3.5 ScheduledTaskRegistrar 类
 
 ```java
 public class ScheduledTaskRegistrar implements ScheduledTaskHolder, InitializingBean, DisposableBean {
@@ -1004,7 +1009,7 @@ public class ScheduledTaskRegistrar implements ScheduledTaskHolder, Initializing
 }
 ```
 
-### 3.6 TaskScheduler 以及实现类
+## 3.6 TaskScheduler 以及实现类
 
 ![TaskScheduler](./assets/JAVA任务调度技术-1645515811598.png)
 
@@ -1028,7 +1033,7 @@ spring提供了三个实现类。
 ThreadPoolTaskScheduler 则是封装了ScheduledThreadPoolExecutor。
 ![1](./assets/JAVA任务调度技术-1645517482388.png)
 
-### 3.7 如何执行cron表达式的任务
+## 3.7 如何执行cron表达式的任务
 
 从前面的代码中我们知道， Spring-task默认使用  ScheduledExecutorService 作为底层逻辑，但是ScheduledExecutorService并不支持cron表达式。可以通过将cron表达式的任务分装成ScheduledExecutorService支持的参数即可。也就是
 
@@ -1102,7 +1107,7 @@ class ReschedulingRunnable extends DelegatingErrorHandlingRunnable implements Sc
 }
 ```
 
-### 3.8 总结
+## 3.8 总结
 
 spring task中任务处理器为TaskScheduler实现类，任务为Trigger的实现类。基本的思想还是与 ScheduledExecutorService 想类似的。在默认情况下也是使用ScheduledExecutorService作为任务的处理器。
 
@@ -1140,17 +1145,17 @@ public class Application2 {
 
 ```
 
-## 4 XXL-JOB
+# 4 XXL-JOB
 
 XXL-JOB是一个分布式任务调度平台，其核心设计目标是开发迅速、学习简单、轻量级、易扩展。现已开放源代码并接入多家公司线上产品线，开箱即用。
 由于是国产开发的，中文文档，而且很全面，可以直接看官方文档 [《分布式任务调度平台XXL-JOB》-官方文档](https://www.xuxueli.com/xxl-job/) 。
 另外，最初作者使用的底层框架是Quartz，后来发现Quartz太过麻烦，自研了一个调度器，简单但是很实用，很值得学习。
 
-### 4.1 为什么我们需要一个分布式的调度平台
+## 4.1 为什么我们需要一个分布式的调度平台
 
 前面介绍的Timer, ScheduledExcutorService 和 Spring Task，都是针对单个实例内的任务调度。假设有一个任务A，是给用户发送消息的，设置每一秒执行一次，如果部署了3个实例，那么就会变成每秒执行3次，可能会导致并发问题。此外在实际的业务中，我们还有可能需要随时调整调度周期，随时停止和启动一个任务等。因此在分布式系统中，有一个分布式调度器尤为重要。
 
-### 4.2 XXL-JOB 的模块
+## 4.2 XXL-JOB 的模块
 
 XXL-JOB的核心模块分为2个。另外xxl-job-executor-samples是一个demo模块
 ![xxl-job模块](./assets/JAVA任务调度技术-xxl-job模块-1645156061685.png)
@@ -1164,19 +1169,21 @@ XXL-JOB的核心模块分为2个。另外xxl-job-executor-samples是一个demo�
 架构图
 ![官方架构图](./assets/JAVA任务调度技术-1645426939228.png)
 
-### 4.3 XXL-JOB 服务端 xxl-job-admin
+## 4.3 XXL-JOB 服务端 xxl-job-admin
 
 **服务端**核心类如下：
 
 
-| 类                                                 | 功能                                                  | 说明 |
-| ---------------------------------------------------- | ------------------------------------------------------- | ------ |
-| com.xxl.job.admin.core.thread.JobScheduleHelper    | 将需要执行的JOB提交到线程池                           |      |
-| com.xxl.job.admin.core.model.XxlJobInfo            | 实体类记录了一个任务的配置，持久化到mysql中           |      |
-| com.xxl.job.admin.core.thread.JobTriggerPoolHelper | 定义了两个线程池，用户接受JobScheduleHelper提交的任务 |      |
-| com.xxl.job.admin.core.thread.JobRegistryHelper    | 注册中心 ，接收客户端的注册和心跳                     |      |
+| 类                   | 功能                                                  | 说明 |
+| ---------------------- | ------------------------------------------------------- | ------ |
+| JobScheduleHelper    | 将需要执行的JOB提交到线程池                           |      |
+| XxlJobInfo           | 实体类记录了一个任务的配置，持久化到mysql中           |      |
+| JobTriggerPoolHelper | 定义了两个线程池，用户接受JobScheduleHelper提交的任务 |      |
+| JobRegistryHelper    | 注册中心 ，接收客户端的注册和心跳                     |      |
 
-#### 4.3.1 JobScheduleHelper 类
+以上类处于com.xxl.job.admin.core包
+
+### 4.3.1 JobScheduleHelper 类
 
 从前面对任务调度的介绍可以看出，一个任务调度器，离不开
 
@@ -1228,10 +1235,10 @@ public class JobScheduleHelper {
 
                         // 1、预读 查询数据库，获取下次执行时间 <= 当前时间+5秒 的所有JOB
                         long nowTime = System.currentTimeMillis();
-                      
+                    
                         //SELECT * FROM xxl_job_info AS t WHERE t.trigger_status = 1 and t.trigger_next_time <= #{maxNextTime} ORDER BY id ASC LIMIT #{pagesize}
                         List<XxlJobInfo> scheduleList = XxlJobAdminConfig.getAdminConfig().getXxlJobInfoDao().scheduleJobQuery(nowTime + PRE_READ_MS, preReadCount);
-                      
+                    
                         if (scheduleList!=null && scheduleList.size()>0) {
                             // 2、遍历处理JOB，看是直接提交给线程池还是先提交到 time-ring后再提交给线程池。
                             for (XxlJobInfo jobInfo: scheduleList) {
@@ -1241,7 +1248,7 @@ public class JobScheduleHelper {
 
                                     // 1、超时触发策略
                                     MisfireStrategyEnum misfireStrategyEnum = MisfireStrategyEnum.match(jobInfo.getMisfireStrategy(), MisfireStrategyEnum.DO_NOTHING);
-                                  
+                                
                                     if (MisfireStrategyEnum.FIRE_ONCE_NOW == misfireStrategyEnum) {
                                         // FIRE_ONCE_NOW 》 trigger
                                         JobTriggerPoolHelper.trigger(jobInfo.getId(), TriggerTypeEnum.MISFIRE, -1, null, null, null);
@@ -1294,7 +1301,7 @@ public class JobScheduleHelper {
         scheduleThread.setDaemon(true);
         scheduleThread.setName("xxl-job, admin JobScheduleHelper#scheduleThread");
         scheduleThread.start();
-      
+    
         // ring thread
         ringThread = new Thread(new Runnable() {
             @Override
@@ -1316,13 +1323,13 @@ public class JobScheduleHelper {
 
 ```
 
-#### 4.3.2 JobRegistryHelper 类
+### 4.3.2 JobRegistryHelper 类
 
-#### 4.3.3 服务端整体初始化逻辑
+### 4.3.3 服务端整体初始化逻辑
 
 ![xxl-job-服务端-初始化步骤.png](./assets/JAVA任务调度技术-1645425368228.png)
 
-### 4.4 客户端逻辑
+## 4.4 客户端逻辑
 
 **客户端**核心类如下：
 
@@ -1341,14 +1348,14 @@ public class JobScheduleHelper {
 
 从以上表格基本可以看出客户端的执行逻辑，因此不再详细描述。
 
-## 5 Quartz
+# 5 Quartz
 
-### 5.1 什么是 Quartz
+## 5.1 什么是 Quartz
 
 从 [Quartz官网](http://www.quartz-scheduler.org/) 简介可以知道，
 Quartz 是一个开源的任务调度框架，可以用于单体应用，也可以用于大型的电子商务平台，支持成千上万的任务。
 
-### 5.1 Quartz 简单demo
+## 5.1 Quartz 简单demo
 
 新建一个maven项目，引入依赖
 
@@ -1799,9 +1806,9 @@ public class QuartzSchedulerThread extends Thread {
 } 
 ```
 
-## 6 Elastic-Job
+# 6 Elastic-Job
 
-## 7 Apache DolphinScheduler
+# 7 Apache DolphinScheduler
 
 # 总结
 
