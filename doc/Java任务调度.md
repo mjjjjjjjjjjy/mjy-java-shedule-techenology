@@ -1,30 +1,32 @@
 <div style="text-align: center;"><span style="font-size: xxx-large" >JAVA 任务调度技术</span></div>
 
-
 # 前言
 
-在日常开发过程中，我们经常会遇到在某个时间或者周期性执行某段代码的场景。比如定期同步订单，定期更新商品信息，定期发送消息等。这些重复执行的代码段常常抽象为一个任务(Task)。 一个Task的特点如下：
+在日常开发过程中，我们经常会遇到周期性执行某段代码的场景。比如定期同步订单，定期更新商品信息，定期发送消息等。这些重复执行的代码段常常可以抽象为一个任务(Task)。 一个Task的特点如下：
 
 > 1. 包含需要执行的业务逻辑。
 > 2. 能够在指定的时间重复（一次或者多次）执行。
 
 围绕Task的特点，开发者们开发了不同的调度框架或者中间件，满足日常开发中的使用。
-以下表格列出了部分实现。本文对部分技术的实现进行了介绍。
+
+以下表格列出了部分实现。
 
 
 | 技术                     |         来源         | 使用场景                     | 其他说明                  |
 | -------------------------- | :---------------------: | ------------------------------ | --------------------------- |
-| Timer                    |        JDK自带        | 目前比较少使用               | 推荐先看该框架            |
+| Timer                    |        JDK自带        | 目前比较少使用               |                           |
 | ScheduledExecutorService |        JDK自带        | 基于线程池技术               |                           |
 | Spring Task              |    Spring-context    | Spring 项目                  |                           |
-| XXL-JOB                  |    国产开源中间件    | 可用于分布式项目调度         |                           |
+| XXL-JOB                  |    国产开源中间件    | 可用于分布式项目调度         | 依赖mysql                 |
 | Quartz                   | OpenSymphony 开源组织 | 一些中间件常常基于Quartz开发 |                           |
-| Elastic-Job              |      当当⽹开源      |                              | 需要依赖ZooKeeper + Mesos |
+| Elastic-Job              |      当当⽹开源      | 可用于分布式项目调度         | 需要依赖ZooKeeper + Mesos |
 | Apache DolphinScheduler  |       易观开源       | 大数据任务调度               |                           |
+
+本文对部分技术的实现进行了介绍，从简单到复杂，从具体到抽象，希望可以让大家在面对一个任务调度框架时可以快速抓住要点，不再陌生。
 
 # 1. Timer
 
-java.util.Timer位于JDK的rt.jar包下，始于jdk1.3，是JDK自带的任务调度器，虽然目前基本不再使用Timer来进行任务调度，但是Timer设计简单，理解起来比较容易。而且后续ScheduledExecutorService的基本原理和Timer基本类似，因此需要对Timer进行一个详细的了解。Timer的实现比较简单，只需要以下4个类即可。
+java.util.Timer位于JDK的rt.jar包下，始于jdk1.3，是JDK自带的任务调度器，虽然目前基本不再使用Timer来进行任务调度，但是Timer设计简单，理解起来比较容易。而且后续ScheduledExecutorService的基本原理和Timer基本类似，因此需要对Timer进行一个详细的了解。Timer的核心类比较少，只需要以下4个类即可。
 
 
 | 类          | 功能                                                | 说明                                          |
@@ -40,9 +42,9 @@ java.util.Timer位于JDK的rt.jar包下，始于jdk1.3，是JDK自带的任务�
 
 一个任务框架，需要可以容纳在不同时间执行的任务，因此必须要有一个容器来缓存或者持久化提交的任务。 那么在多任务的场景下，我们如何挑选出需要执行的任务呢？以下对一些场景进行分析：
 
-> **方案1.** 对所有的任务进行遍历，对于可执行时间小于当前时间的任务，执行业务逻辑。
+> **方案1.** 对所有的任务进行遍历，对于下次执行时间小于当前时间的任务，执行业务逻辑。
 >
->> 时间复杂度为O(n)，一些时间没到的任务也被遍历到了。性能有些浪费了。
+>> 时间复杂度为O(n)，一些时间没到的任务也被遍历到了。性能不好。
 >>
 >
 > **方案2.** 先对所有的任务，按照下次执行时间的大小进行排序，每次只取头部任务，即时间最小的任务进行时间判断，如果小于当前时间，则执行任务。
@@ -52,7 +54,7 @@ java.util.Timer位于JDK的rt.jar包下，始于jdk1.3，是JDK自带的任务�
 >
 > **方案3.** 采用优先队列可以满足排序要求，部分有序，头部为权值最小，每次取权值即可。
 
-从以上分析可以看出，一个任务框架，如果每次只去最早执行的一个任务来执行，可以采用优先队列。Timer也是如此，基本数据结构为平衡二叉堆(balanced binary heap)。因此想要理解Timer，需要对平衡二叉堆进行了解。
+从以上分析可以看出，一个任务框架，可以采用优先队列来容纳提交的任务。Timer正是如此，它的基本数据结构为平衡二叉堆(balanced binary heap)。想要理解Timer，需要对平衡二叉堆进行了解。
 详细可以参考  [【Java基础】JAVA中优先队列详解](https://www.cnblogs.com/satire/p/14919342.html) 。 摘抄如下：
 
 ### 1.1.1 基本结构
@@ -67,7 +69,7 @@ Java平衡二叉堆的定义为：
 
 结构示例如下：
 
-![平衡二叉堆的基本接口](./assets/JAVA任务调度技术-平衡二叉堆的基本接口-1644890890679.png)
+![平衡二叉堆结构](./assets/Java任务调度-1645600723996.png)
 
 从图中可以看出，可以通过数组来实现平衡二叉堆。每一个节点的编号，可以使用数组的下标来表示。
 
@@ -156,7 +158,7 @@ delay： 延迟毫秒数period： 时间间隔
 > 5.指定的时间Date开始，周期性执行任务，两次任务之间间隔period毫秒。
 > 6.指定的时间Date开始，以固定频率执行任务，两次任务之间间隔period毫秒。
 
-需要特别说明的是2和3，5和6之间的区别，也就是schedule和scheduleAtFixedRate的区别。具体看下表：
+其中需要特别说明的是2和3，5和6之间的区别，也就是schedule和scheduleAtFixedRate的区别。具体看下表：
 
 
 | 方法名              | 下一个执行时间nextExecutionTime | 说明                                                                                             |
@@ -167,6 +169,8 @@ delay： 延迟毫秒数period： 时间间隔
 注： currentTime：当前时间，nextExecutionTime：下次执行时间，delay：时间间隔
 
 ### 1.2.1 Timer简单的例子：
+
+Demo先行，先看一个简单的例子，有个初步的印象。
 
 ```java
 public class Application {
@@ -286,7 +290,7 @@ class TaskQueue {
         //向上排序
         fixUp(size);
     }
-  
+    //新增元素时向上排序
     private void fixUp(int k) {
         while (k > 1) {
             int j = k >> 1;
@@ -296,7 +300,7 @@ class TaskQueue {
             k = j;
         }
     }
-
+   //刷新
    void rescheduleMin(long newTime) {
       queue[1].nextExecutionTime = newTime;
       fixDown(1);
@@ -363,7 +367,7 @@ class TimerThread extends Thread {
                             queue.removeMin();
                             continue;  
                         }
-        
+  
                         currentTime = System.currentTimeMillis();
                         //当前task计划的执行时间。
                         executionTime = task.nextExecutionTime;
@@ -395,7 +399,7 @@ class TimerThread extends Thread {
 }
 ```
 
-TimerThread 中的 mainLoop 方法+TaskQueue队列，看起来非常熟悉，在queue为空的时候，会调用queue.wait()方法。直到Timer在新增元素时，调用了queue.notify()。这些代码和BlockQueue非常像。
+TimerThread 中的 mainLoop 方法+TaskQueue队列，看起来非常熟悉，在queue为空的时候，会调用queue.wait()方法。直到Timer在新增元素时，调用了queue.notify()。这些代码和BlockQueue原理非常像。
 
 ### 1.2.4 TimerTask 类源码分析
 
@@ -417,7 +421,7 @@ public abstract class TimerTask implements Runnable {
 
 通过对Timer的四个核心类，我们可以得出以下调度示意图。
 
-![](./assets/README-1644819175724.png)
+![java.util.Timer.jpg](./assets/Java任务调度-1645626659615.jpg)
 
 ## 1.4 Timer 总结
 
@@ -433,6 +437,8 @@ public abstract class TimerTask implements Runnable {
 > - 假设前序任务抛出了非InterruptedException的异常，则整个队列将会被清空，任务调度终止。
 
 基于以上局限性，在实际应用中，使用Timer使用得并不多。常用的为 ScheduledExecutorService。ScheduledExecutorService与Timer 的最大区别是将任务提交给线程池处理。
+
+
 
 # 2. ScheduledExecutorService
 
@@ -455,20 +461,22 @@ JDK在1.5之后J引入了 ThreadPoolExecutor 线程池技术。 线程池技术�
 
 ScheduledThreadPoolExecutor 在实现上与Timer是相似的，都是通过实现一个优先队列来管理任务，同时这个优先队列又是一个阻塞队列，在获取第一个任务后，只有到了执行时间才会返回任务。一个比较大的改进在于，获取任务后不是直接执行代码，而是交给线程池来调度。
 
+## 2.1核心类
+
 ScheduledExecutorService 的一些核心类如下：
 
 
-| 类                                              | 功能                             | 说明                                                     |
-| ------------------------------------------------- | ---------------------------------- | ---------------------------------------------------------- |
-| ScheduledExecutorService                        | 抽象类，定义了提交任务的抽象方法 |                                                          |
-| Executors.DelegatedScheduledExecutorService     | 包装类                           | 用于包装 ScheduledThreadPoolExecutor，<br>只暴露关键方法 |
-| ScheduledThreadPoolExecutor                     | 核心执行器                       |                                                          |
-| ScheduledThreadPoolExecutor.DelayedWorkQueue    | 延迟阻塞队列                     | 任务周期执行的核心方法在这个类中实现                     |
-| ScheduledThreadPoolExecutor.ScheduledFutureTask | 队列中的对象                     | 说明                                                     |
+| 类                                              | 功能         | 说明                                                     |
+| ------------------------------------------------- | -------------- | ---------------------------------------------------------- |
+| ScheduledExecutorService                        | 抽象类       |                                                          |
+| Executors.DelegatedScheduledExecutorService     | 包装类       | 用于包装 ScheduledThreadPoolExecutor，<br>只暴露关键方法 |
+| ScheduledThreadPoolExecutor                     | 核心执行器   | 实现类，真正执行调度逻辑的地方                           |
+| ScheduledThreadPoolExecutor.DelayedWorkQueue    | 延迟阻塞队列 | 任务周期执行的核心方法在这个类中实现                     |
+| ScheduledThreadPoolExecutor.ScheduledFutureTask | 队列中的对象 | 是ScheduledThreadPoolExecutor的成员内部类                |
 
 以上类处于java.util.concurrent包下
 
-## 2.1 ScheduledExecutorService 的简单用法和介绍
+## 2.2 ScheduledExecutorService 的简单用法和介绍
 
 ```java
 public class Application {
@@ -499,7 +507,7 @@ public interface ScheduledExecutorService extends ExecutorService {
 }
 ```
 
-## 2.2 ScheduledThreadPoolExecutor 类
+## 2.3 ScheduledThreadPoolExecutor 类
 
 ScheduledExecutorService只定义了相应的规范，还需要具体类进行实现。
 
@@ -559,7 +567,7 @@ public class ScheduledThreadPoolExecutor
 
 到这时ScheduledExecutorService的秘密浮出水面，核心在于 DelayedWorkQueue。
 
-## 2.3 DelayedWorkQueue 类实现
+## 2.4 DelayedWorkQueue 类实现
 
 DelayedWorkQueue 类的定义如下。可以看到，DelayedWorkQueue的实现了BlockingQueue接口，可以传入JDK的线程池进行消费。
 
@@ -618,7 +626,7 @@ static class DelayedWorkQueue extends AbstractQueue<Runnable> implements Blockin
                   // 4 删除队列的第一个个元素并重新向下排序。返回任务
                   return finishPoll(first);
                }
-           
+   
                first = null; // don't retain ref while waiting  等待时去除引用
                if (leader != null)
                   available.await();
@@ -666,7 +674,7 @@ static class DelayedWorkQueue extends AbstractQueue<Runnable> implements Blockin
 }
 ```
 
-## 2.4 ScheduledFutureTask 类
+## 2.5 ScheduledFutureTask 类
 
 从上一节DelayedWorkQueue类中的take方法和finishPoll方法可知，在线程池获取task后，已经从队列中移走，那么对于重复执行的队列怎么办呢？那就是在线程池执行run方法前，重新将task加到队列中。
 
@@ -723,9 +731,11 @@ public class ScheduledThreadPoolExecutor
 
 ```
 
-## 2.5 ScheduledExecutorService 总结
+## 2.6  总结
 
 通过分析源码可以看出，ScheduledExecutorService  是通过实现一个优先队列来存储和调度任务的。从原理上来说是和Timer是类似的。可以认为是Timer 的升级版，新增了线程池执行任务的功能。
+
+![image.png](./assets/1645675721879-image.png)
 
 ScheduledExecutorService 和 Timer 比较
 
@@ -736,6 +746,7 @@ ScheduledExecutorService 和 Timer 比较
 | ScheduledExecutorService |                      | 1、线程池异步执行任务<br>      2、从头部获取任务后，移除当前任务 ，排序一次。在执行任务前修改时间后，再提交到队列。相当于排序两次 |
 
 但是ScheduledExecutorService也有一定的局限性，那就是任务只能执行一次或者以固定的时间差周期性执行。不够灵活。
+
 
 # 3 Spring Task
 
@@ -791,11 +802,11 @@ public class Application {
 | ReschedulingRunnable                 | cron表达式Task适配器 | 对于使用了Trigger的Task，将使用ReschedulingRunnable重新封装  |
 | Trigger                              | 触发器               | 对于cron表达式的task，有用到                                 |
 
-以上类都处于org.springframework.scheduling包下。
+以上类都处于org.springframework.scheduling包下。后续将会对这些类进行介绍。
 
 ## 3.3 Scheduled 注解
 
-首先看一下Scheduled的代码，看提供了哪些工鞥呢。
+首先看一下Scheduled的代码，看提供了哪些功能呢。
 
 ```java
 public @interface Scheduled {
@@ -814,7 +825,7 @@ public @interface Scheduled {
 }
 ```
 
-Scheduled 中包含了任务调度的相关配置。 相比较ScheduledExecutorService，多了cron表达式。在任务的控制上更加灵活，不再局限于固定重复周期。
+Scheduled 中包含了任务调度的相关配置参数。 相比较ScheduledExecutorService，多了cron表达式。在任务的控制上更加灵活，不再局限于固定重复周期。
 
 ## 3.4 ScheduledAnnotationBeanPostProcessor 类
 
@@ -845,9 +856,9 @@ public class SchedulingConfiguration {
 }
 ```
 
-SchedulingConfiguration只做了一件实行，那就是配置了ScheduledAnnotationBeanPostProcessor。
+SchedulingConfiguration只做了一件事情，那就是配置了ScheduledAnnotationBeanPostProcessor。
 
-ScheduledAnnotationBeanPostProcessor实现了Spring的后置处理器，因此在Spring初始化后，根据相应的配置或者注解，可以筛选出对应的方法，封装成为ScheduledTask。等待被调用。在Spring初始化完成后将会触发任务的调度。
+ScheduledAnnotationBeanPostProcessor实现了Spring的后置处理器，因此在Spring启动后，可以根据相应的配置或者注解，可以筛选出对应的方法，封装成为ScheduledTask，等待被调用。在Spring初始化完成后将会触发任务的调度。
 
 ```java
 
@@ -859,11 +870,18 @@ public class ScheduledAnnotationBeanPostProcessor
   
     //用来缓存task和TaskScheduler调度器
    private final ScheduledTaskRegistrar registrar;
+
+   @Override
+   public Object postProcessAfterInitialization(Object bean, String beanName) {
+       // 忽略。。
+       processScheduled(scheduled, method, bean);
+       //忽略。。
+   }
   
     //处理Spring bean
    protected void processScheduled(Scheduled scheduled, Method method, Object bean) {
       try {
-          //将Spring bean 封装成为一个Runnable
+          //将Spring bean 封装成为一个Runnable 。在执行Runnable方法时，使用反射技术 method.invoke(this.target)，执行原本逻辑即可。
          Runnable runnable = createRunnable(bean, method);
          // 获取配置
          String cron = scheduled.cron();
@@ -877,6 +895,7 @@ public class ScheduledAnnotationBeanPostProcessor
                   tasks.add(this.registrar.scheduleCronTask(new CronTask(runnable, new CronTrigger(cron, timeZone))));
             }
          }
+         //忽略其他情况
    
       }catch (Exception e){}
   
@@ -889,8 +908,23 @@ public class ScheduledAnnotationBeanPostProcessor
       }
    }
    
-   //这部分主要是从Spring中获取 scheduler 只保留核心代码
+   //这部分主要是从Spring中获取配置的 scheduler 只保留核心代码
    private void finishRegistration() {
+       
+      if (this.scheduler != null) {
+         this.registrar.setScheduler(this.scheduler);
+      }
+       
+       if (this.beanFactory instanceof ListableBeanFactory) {
+         Map<String, SchedulingConfigurer> beans =
+                 ((ListableBeanFactory) this.beanFactory).getBeansOfType(SchedulingConfigurer.class);
+         List<SchedulingConfigurer> configurers = new ArrayList<>(beans.values());
+         AnnotationAwareOrderComparator.sort(configurers);
+         for (SchedulingConfigurer configurer : configurers) {
+            configurer.configureTasks(this.registrar);
+         }
+      }
+
    
       if (this.registrar.hasTasks() && this.registrar.getScheduler() == null) {
          try {
@@ -931,11 +965,24 @@ public class ScheduledAnnotationBeanPostProcessor
 
 从 ScheduledAnnotationBeanPostProcessor 源码可以看出，经过处理后，所有的任务和执行器都存放于ScheduledTaskRegistrar中。通过调用afterPropertiesSet()来启动任务。总结来说，做了以下3件事情
 
-> 1、将被注解的方法封装成为 Task。
-> 2、从容器中查找 TaskScheduler。
-> 3、将1和2都存到ScheduledTaskRegistrar。
+> 1、将被注解的方法封装成为 Task。    
+> 2、从容器中查找合适的 TaskScheduler。    
+> 3、将1和2都存到ScheduledTaskRegistrar。    
+
+其中查找 TaskScheduler 的来源分为4个。
+
+> 1、调用ScheduledAnnotationBeanPostProcessor实例的set方法。    
+> 2、配置SchedulingConfigurer实现类到spring容器中。    
+> 3、配置 TaskScheduler 实现类 到spring容器中。    
+> 4、配置ScheduledExecutorService实现类到Spring 容器中。
+> 5、在1-4都没有做的情况下ScheduledTaskRegistrar会直接调用 Executors.newSingleThreadScheduledExecutor()获取一个ScheduledExecutorService。   
+
+其中1-4在 ScheduledAnnotationBeanPostProcessor 中实现， 5在ScheduledTaskRegistrar中实现。
+
 
 ## 3.5 ScheduledTaskRegistrar 类
+
+ScheduledTaskRegistrar是一个核心类，也是一个容器类，保存了所有的task的定义。同时也是真正将Task提交给调度器的地方。具体看以下代码。
 
 ```java
 public class ScheduledTaskRegistrar implements ScheduledTaskHolder, InitializingBean, DisposableBean {
@@ -1011,9 +1058,10 @@ public class ScheduledTaskRegistrar implements ScheduledTaskHolder, Initializing
 
 ## 3.6 TaskScheduler 以及实现类
 
-![TaskScheduler](./assets/JAVA任务调度技术-1645515811598.png)
-
 TaskScheduler 定义了一系列提交任务的方法，与 ScheduledExecutorService 角色相当。
+
+![TaskScheduler方法](./assets/JAVA任务调度技术-1645516233625.png)
+
 但需要注意的是新增了一个方法。
 
 ```
@@ -1024,7 +1072,7 @@ ScheduledFuture<?> schedule(Runnable task, Trigger trigger);
 
 spring提供了三个实现类。
 
-![TaskScheduler方法](./assets/JAVA任务调度技术-1645516233625.png)
+![TaskScheduler](./assets/JAVA任务调度技术-1645515811598.png)
 
 实现类 ConcurrentTaskScheduler 注解上讲的很明白，就是一个将java.util.concurrent.ScheduledExecutorService 适配成 TaskScheduler 的适配器。
 其构造器如下
@@ -1033,9 +1081,11 @@ spring提供了三个实现类。
 ThreadPoolTaskScheduler 则是封装了ScheduledThreadPoolExecutor。
 ![1](./assets/JAVA任务调度技术-1645517482388.png)
 
+因此很明显，Spring-task的底层就是由ScheduledExecutorService来提供实际调度的。当然也可以自己实现一个TaskScheduler的实现类，但目前看来并没有理由再造一个这样的轮子。
+
 ## 3.7 如何执行cron表达式的任务
 
-从前面的代码中我们知道， Spring-task默认使用  ScheduledExecutorService 作为底层逻辑，但是ScheduledExecutorService并不支持cron表达式。可以通过将cron表达式的任务分装成ScheduledExecutorService支持的参数即可。也就是
+从前面的代码中我们知道， Spring-task默认使用  ScheduledExecutorService 作为底层逻辑，但是ScheduledExecutorService并不支持cron表达式。不过可以通过将cron表达式的任务分装成ScheduledExecutorService支持的参数即可。也就是
 
 > 1、将task封装成为CronTask， 先计算cron的下次执行时间与当前的时间差delay。
 > 2、调用 ScheduledExecutorService 实例提交任务。让任务延迟delay执行一次，注意只执行一次。
@@ -1157,7 +1207,8 @@ XXL-JOB是一个分布式任务调度平台，其核心设计目标是开发迅�
 
 ## 4.2 XXL-JOB 的模块
 
-XXL-JOB的核心模块分为2个。另外xxl-job-executor-samples是一个demo模块
+从[github](https://github.com/xuxueli/xxl-job/) 上下载源码，可以看到XXL-JOB的核心模块分为2个。另外xxl-job-executor-samples是一个demo模块
+
 ![xxl-job模块](./assets/JAVA任务调度技术-xxl-job模块-1645156061685.png)
 
 
@@ -1166,8 +1217,14 @@ XXL-JOB的核心模块分为2个。另外xxl-job-executor-samples是一个demo�
 | xxl-job-admin | 服务端（调度中心） | 管理界面+任务调度          |
 | xxl-job-core  | 客户端（执行器）   | 在项目中引用，执行业务逻辑 |
 
-架构图
+官方架构图
 ![官方架构图](./assets/JAVA任务调度技术-1645426939228.png)
+
+简化版
+
+![xxl-job客户端和服务端交互示意图.png](./assets/1645627791745-image.png)
+
+XXL-JOB的特点： “调度”和“任务”两部分可以相互解耦，提高系统整体稳定性和扩展性
 
 ## 4.3 XXL-JOB 服务端 xxl-job-admin
 
@@ -1183,7 +1240,71 @@ XXL-JOB的核心模块分为2个。另外xxl-job-executor-samples是一个demo�
 
 以上类处于com.xxl.job.admin.core包
 
-### 4.3.1 JobScheduleHelper 类
+```java
+
+```
+
+### 4.3.1 初始化入口
+
+admin的初始化入口在XxlJobAdminConfig，从里面可以看到
+```java
+@Component
+public class XxlJobAdminConfig implements InitializingBean, DisposableBean {
+
+    private static XxlJobAdminConfig adminConfig = null;
+    public static XxlJobAdminConfig getAdminConfig() {
+        return adminConfig;
+    }
+
+
+    // ---------------------- XxlJobScheduler ----------------------
+
+    private XxlJobScheduler xxlJobScheduler;
+
+    @Override
+    public void afterPropertiesSet() throws Exception {
+        adminConfig = this;
+
+        xxlJobScheduler = new XxlJobScheduler();
+        xxlJobScheduler.init();
+    }
+    //省略
+}
+```
+
+```java
+public class XxlJobScheduler  {
+    private static final Logger logger = LoggerFactory.getLogger(XxlJobScheduler.class);
+
+   //启动了一些列的线程或者线程池来来处理相关逻辑
+    public void init() throws Exception {
+        // init i18n
+        initI18n();
+
+        // admin trigger pool start
+        JobTriggerPoolHelper.toStart();
+
+        // admin registry monitor run
+        JobRegistryHelper.getInstance().start();
+
+        // admin fail-monitor run
+        JobFailMonitorHelper.getInstance().start();
+
+        // admin lose-monitor run ( depend on JobTriggerPoolHelper )
+        JobCompleteHelper.getInstance().start();
+
+        // admin log report start
+        JobLogReportHelper.getInstance().start();
+
+        // start-schedule  ( depend on JobTriggerPoolHelper )
+        JobScheduleHelper.getInstance().start();
+
+        logger.info(">>>>>>>>> init xxl-job admin success.");
+    }
+}
+```
+
+### 4.3.2 JobScheduleHelper 类
 
 从前面对任务调度的介绍可以看出，一个任务调度器，离不开
 
@@ -1235,10 +1356,10 @@ public class JobScheduleHelper {
 
                         // 1、预读 查询数据库，获取下次执行时间 <= 当前时间+5秒 的所有JOB
                         long nowTime = System.currentTimeMillis();
-                    
+  
                         //SELECT * FROM xxl_job_info AS t WHERE t.trigger_status = 1 and t.trigger_next_time <= #{maxNextTime} ORDER BY id ASC LIMIT #{pagesize}
                         List<XxlJobInfo> scheduleList = XxlJobAdminConfig.getAdminConfig().getXxlJobInfoDao().scheduleJobQuery(nowTime + PRE_READ_MS, preReadCount);
-                    
+  
                         if (scheduleList!=null && scheduleList.size()>0) {
                             // 2、遍历处理JOB，看是直接提交给线程池还是先提交到 time-ring后再提交给线程池。
                             for (XxlJobInfo jobInfo: scheduleList) {
@@ -1248,7 +1369,7 @@ public class JobScheduleHelper {
 
                                     // 1、超时触发策略
                                     MisfireStrategyEnum misfireStrategyEnum = MisfireStrategyEnum.match(jobInfo.getMisfireStrategy(), MisfireStrategyEnum.DO_NOTHING);
-                                
+              
                                     if (MisfireStrategyEnum.FIRE_ONCE_NOW == misfireStrategyEnum) {
                                         // FIRE_ONCE_NOW 》 trigger
                                         JobTriggerPoolHelper.trigger(jobInfo.getId(), TriggerTypeEnum.MISFIRE, -1, null, null, null);
@@ -1301,7 +1422,7 @@ public class JobScheduleHelper {
         scheduleThread.setDaemon(true);
         scheduleThread.setName("xxl-job, admin JobScheduleHelper#scheduleThread");
         scheduleThread.start();
-    
+  
         // ring thread
         ringThread = new Thread(new Runnable() {
             @Override
@@ -1323,9 +1444,186 @@ public class JobScheduleHelper {
 
 ```
 
-### 4.3.2 JobRegistryHelper 类
+### 4.3.3  XxlJobTrigger 类
 
-### 4.3.3 服务端整体初始化逻辑
+经过JobScheduleHelper调度，job的参数会被提交的线程池，线程池由JobTriggerPoolHelper实现，比较简单，不再描述，然后最终会使用 XxlJobTrigger 是触发执行job的地方。
+
+```java
+public class XxlJobTrigger {
+   
+    public static void trigger(int jobId,
+                               TriggerTypeEnum triggerType,
+                               int failRetryCount,
+                               String executorShardingParam,
+                               String executorParam,
+                               String addressList) {
+
+        //1、 从数据库获取job配置
+        XxlJobInfo jobInfo = XxlJobAdminConfig.getAdminConfig().getXxlJobInfoDao().loadById(jobId);
+        if (jobInfo == null) {
+            return;
+        }
+        if (executorParam != null) {
+            //如果传参就覆盖
+            jobInfo.setExecutorParam(executorParam);
+        }
+        int finalFailRetryCount = failRetryCount>=0?failRetryCount:jobInfo.getExecutorFailRetryCount();
+        
+        // 2 从数据库获取分组信息（本质就是获取接收job的地址）
+        XxlJobGroup group = XxlJobAdminConfig.getAdminConfig().getXxlJobGroupDao().load(jobInfo.getJobGroup());
+
+        // cover addressList
+        if (addressList!=null && addressList.trim().length()>0) {
+            group.setAddressType(1);
+            //传参的话就覆盖
+            group.setAddressList(addressList.trim());
+        }
+
+        // sharding param
+        int[] shardingParam = null;
+        if (executorShardingParam!=null){
+            String[] shardingArr = executorShardingParam.split("/");
+            if (shardingArr.length==2 && isNumeric(shardingArr[0]) && isNumeric(shardingArr[1])) {
+                shardingParam = new int[2];
+                shardingParam[0] = Integer.valueOf(shardingArr[0]);
+                shardingParam[1] = Integer.valueOf(shardingArr[1]);
+            }
+        }
+        if (ExecutorRouteStrategyEnum.SHARDING_BROADCAST==ExecutorRouteStrategyEnum.match(jobInfo.getExecutorRouteStrategy(), null)
+                && group.getRegistryList()!=null && !group.getRegistryList().isEmpty()
+                && shardingParam==null) {
+            //分片
+            for (int i = 0; i < group.getRegistryList().size(); i++) {
+                processTrigger(group, jobInfo, finalFailRetryCount, triggerType, i, group.getRegistryList().size());
+            }
+        } else {
+            if (shardingParam == null) {
+                //分片参数，这里意思是只发给一个地址。
+                shardingParam = new int[]{0, 1};
+            }
+            processTrigger(group, jobInfo, finalFailRetryCount, triggerType, shardingParam[0], shardingParam[1]);
+        }
+
+    }
+
+    /**
+     * @param group                     job group, registry list may be empty
+     * @param jobInfo
+     * @param finalFailRetryCount  纯粹是为了打日志
+     * @param triggerType          为了打日志
+     * @param index                     sharding index
+     * @param total                     sharding index
+     */
+    private static void processTrigger(XxlJobGroup group, XxlJobInfo jobInfo, int finalFailRetryCount, TriggerTypeEnum triggerType, int index, int total){
+
+        //阻塞策略
+        ExecutorBlockStrategyEnum blockStrategy = ExecutorBlockStrategyEnum.match(jobInfo.getExecutorBlockStrategy(), ExecutorBlockStrategyEnum.SERIAL_EXECUTION);  // block strategy
+       //路由策略 就是如何发给客户端，如第一个，最后一个，一致性哈希
+        ExecutorRouteStrategyEnum executorRouteStrategyEnum = ExecutorRouteStrategyEnum.match(jobInfo.getExecutorRouteStrategy(), null);    // route strategy
+       //分片参数 日志记录用
+        String shardingParam = (ExecutorRouteStrategyEnum.SHARDING_BROADCAST==executorRouteStrategyEnum)?String.valueOf(index).concat("/").concat(String.valueOf(total)):null;
+
+        // 1、save log-id
+        XxlJobLog jobLog = new XxlJobLog();
+        jobLog.setJobGroup(jobInfo.getJobGroup());
+        jobLog.setJobId(jobInfo.getId());
+        jobLog.setTriggerTime(new Date());
+        
+        //记录日志
+        XxlJobAdminConfig.getAdminConfig().getXxlJobLogDao().save(jobLog);
+
+        // 2、组装参数
+        TriggerParam triggerParam = new TriggerParam();
+        triggerParam.setJobId(jobInfo.getId());
+        triggerParam.setExecutorHandler(jobInfo.getExecutorHandler());
+        triggerParam.setExecutorParams(jobInfo.getExecutorParam());
+        triggerParam.setExecutorBlockStrategy(jobInfo.getExecutorBlockStrategy());
+        triggerParam.setExecutorTimeout(jobInfo.getExecutorTimeout());
+        triggerParam.setLogId(jobLog.getId());
+        triggerParam.setLogDateTime(jobLog.getTriggerTime().getTime());
+        triggerParam.setGlueType(jobInfo.getGlueType());
+        triggerParam.setGlueSource(jobInfo.getGlueSource());
+        triggerParam.setGlueUpdatetime(jobInfo.getGlueUpdatetime().getTime());
+        triggerParam.setBroadcastIndex(index);
+        triggerParam.setBroadcastTotal(total);
+
+        // 3、init address
+        String address = null;
+        ReturnT<String> routeAddressResult = null;
+        if (group.getRegistryList()!=null && !group.getRegistryList().isEmpty()) {
+            if (ExecutorRouteStrategyEnum.SHARDING_BROADCAST == executorRouteStrategyEnum) {
+                //广播模式，获取指定下标的 url 。
+                if (index < group.getRegistryList().size()) {
+                    address = group.getRegistryList().get(index);
+                } else {
+                    address = group.getRegistryList().get(0);
+                }
+            } else {
+                //根据路由策略获取 url.
+                routeAddressResult = executorRouteStrategyEnum.getRouter().route(triggerParam, group.getRegistryList());
+                if (routeAddressResult.getCode() == ReturnT.SUCCESS_CODE) {
+                    address = routeAddressResult.getContent();
+                }
+            }
+        } else {
+            routeAddressResult = new ReturnT<String>(ReturnT.FAIL_CODE, I18nUtil.getString("jobconf_trigger_address_empty"));
+        }
+
+        // 4、trigger remote executor
+        ReturnT<String> triggerResult = null;
+        if (address != null) {
+            triggerResult = runExecutor(triggerParam, address);
+        } else {
+            triggerResult = new ReturnT<String>(ReturnT.FAIL_CODE, null);
+        }
+        
+        // 5、collection trigger info
+        //忽略一长串组装日志代码
+       
+        //保存日志
+        XxlJobAdminConfig.getAdminConfig().getXxlJobLogDao().updateTriggerInfo(jobLog);
+    }
+
+    
+    //根据地址url，将参数发送到指定的客户端。
+    public static ReturnT<String> runExecutor(TriggerParam triggerParam, String address){
+        ReturnT<String> runResult = null;
+        try {
+            ExecutorBiz executorBiz = XxlJobScheduler.getExecutorBiz(address);
+            runResult = executorBiz.run(triggerParam);
+        } catch (Exception e) {
+            logger.error(">>>>>>>>>>> xxl-job trigger error, please check if the executor[{}] is running.", address, e);
+            runResult = new ReturnT<String>(ReturnT.FAIL_CODE, ThrowableUtil.toString(e));
+        }
+
+        StringBuffer runResultSB = new StringBuffer(I18nUtil.getString("jobconf_trigger_run") + "：");
+        runResultSB.append("<br>address：").append(address);
+        runResultSB.append("<br>code：").append(runResult.getCode());
+        runResultSB.append("<br>msg：").append(runResult.getMsg());
+
+        runResult.setMsg(runResultSB.toString());
+        return runResult;
+    }
+
+}
+
+```
+
+总结以上XxlJobTrigger类的代码，做了几件事
+
+>1、根据jobId从数据库获取job参数
+2、根据job参数获取groupId后，再获取分组信息，里面包含了分组中的客户端 ip:port地址。
+3、根据路由策略，获取指定的address，将job参数通过http发送往客户端。
+4、记录日志。
+
+
+### 4.3.4 JobRegistryHelper 类
+客户端会定时上报自身的ip+port，JobRegistryHelper就是专门处理这些信息的。
+实现类比较简单，就补贴源码了，只讲一下逻辑。
+1、定义了一个线程池，专门保存或者修改用来处理客户端上报的address。
+2、定义了一个后台线程，周期性（30s）处理以下逻辑：清除过期的客户端注册信息（30*3s不上报），将最新的address更新到各自的任务组中。
+
+### 4.3.5 服务端整体初始化逻辑
 
 ![xxl-job-服务端-初始化步骤.png](./assets/JAVA任务调度技术-1645425368228.png)
 
@@ -1336,17 +1634,38 @@ public class JobScheduleHelper {
 ![xxl-job-客户端-初始化步骤.png](./assets/JAVA任务调度技术-1645426033285.png)
 
 
-| 类                                         | 功能             | 说明                                                                                                          |
-| -------------------------------------------- | ------------------ | --------------------------------------------------------------------------------------------------------------- |
-| com.xxl.job.core.handler.annotation.XxlJob | Task注解         | 被标注的方法将会被处理成为 IJobHandler, 与@Scheduled注解功能相似 （19年底新增注解）。 每个IJobHandler有唯标识 |
-| com.xxl.job.core.server.EmbedServer        | 客户端server     | 启动一个netty,用于接收服务端的调度                                                                            |
-| com.xxl.job.core.biz.impl.ExecutorBizImpl  | 处理服务端的请求 | EmbedServer接收请求后，实际交给ExecutorBizImpl进行处理，处理后缓存于LinkedBlockingQueue中等待调用             |
-| com.xxl.job.core.biz.model.TriggerParam    | 触发参数         | 记录服务端发送过来的任务                                                                                      |
-| com.xxl.job.core.thread.JobThread          | Job线程          | 用 LinkedBlockingQueue 缓存服务端传递过来的 TriggerParam。轮询 LinkedBlockingQueue。                          |
-| com.xxl.job.core.handler.IJobHandler       | Task抽象类       | 被@XxlJob的注释的方法，或者通过服务端传递过来的代码，将会封装成为一个  IJobHandler    实现类                  |
-| com.xxl.job.core.context.XxlJobContext     | 上下文           | 内置InheritableThreadLocal，在线程中存储变量，供给IJobHandler                                                 |
+| 类               | 功能        | 说明                                                                                 |
+|-----------------|-----------|------------------------------------------------------------------------------------|
+| XxlJob          | Task注解    | 被标注的方法将会被处理成为 IJobHandler, 与@Scheduled注解功能相似 （19年底新增注解）。 每个IJobHandler有唯标识         |
+| EmbedServer     | 客户端server | 启动一个netty,用于接收服务端的调度                                                               |
+| ExecutorBizImpl | 处理服务端的请求  | EmbedServer接收请求后，实际交给ExecutorBizImpl进行处理，里面有处理阻塞策略                                 |
+| TriggerParam    | 触发参数      | 记录服务端发送过来的任务                                                                       |
+| JobThread       | Job线程     | 用 LinkedBlockingQueue 缓存服务端传递过来的 TriggerParam。轮询 LinkedBlockingQueue，顺序处理同一个job的任务 |
+| IJobHandler     | Task抽象类   | 被@XxlJob的注释的方法，或者通过服务端传递过来的代码，将会封装成为一个  IJobHandler    实现类                         |
+| XxlJobContext   | 上下文       | 内置InheritableThreadLocal，在线程中存储变量，供给IJobHandler                                    |
 
-从以上表格基本可以看出客户端的执行逻辑，因此不再详细描述。
+从以上表格基本可以看出客户端的执行逻辑，其中比较重要的是 ExecutorBizImpl 和 JobThread，以及XxlJob注解的原理。 将会对这三个类进行介绍。
+
+
+
+## 4.5 几个表格作用
+
+xxl_job_group：任务分组。一个执行器算作一个组。每组下面会记录对应的实例地址。  
+![任务组](./assets/Java任务调度-1645696899152.png)
+xxl_job_info：具体的任务信息。  
+xxl_job_lock：分布式锁  
+xxl_job_log：日志     
+xxl_job_log_report：调度统计      
+xxl_job_logglue： 可以记录GLUE模式代码历史版本       
+xxl_job_registry：注册信息表，每一台机器注册上来，都会记录一条记录。      
+![注册表](./assets/Java任务调度-1645696584108.png)
+xxl_job_user：用户表       
+
+其中xxl_job_group，xxl_job_info，xxl_job_lock是调度器的关键，其他的是起到支撑辅助作用。
+
+## 4.6 为什么说xxl-job是个全异步化调度器
+
+查看  xxl-job-admin， xxl-job-core。
 
 # 5 Quartz
 
