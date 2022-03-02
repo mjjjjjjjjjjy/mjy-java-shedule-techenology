@@ -2,7 +2,7 @@
 
 # 前言
 
-在日常开发过程中，我们经常会遇到周期性执行某段代码的场景。比如定期同步订单，定期更新商品信息，定期发送消息等。这些重复执行的代码段常常可以抽象为一个任务(Task)。 一个Task的特点如下：
+在日常开发过程中，我们经常会遇到周期性执行某段代码的场景。比如定期同步订单，定期更新商品信息，定期发送消息等。这些重复执行的代码可以抽象为一个任务(Task)。 一个Task的特点如下：
 
 > 1. 包含需要执行的业务逻辑。
 > 2. 能够在指定的时间重复（一次或者多次）执行。
@@ -12,29 +12,31 @@
 以下表格列出了部分实现。
 
 
-| 技术                     |         来源         | 使用场景                     | 其他说明                  |
-| -------------------------- | :---------------------: | ------------------------------ | --------------------------- |
-| Timer                    |        JDK自带        | 目前比较少使用               |                           |
-| ScheduledExecutorService |        JDK自带        | 基于线程池技术               |                           |
-| Spring Task              |    Spring-context    | Spring 项目                  |                           |
-| XXL-JOB                  |    国产开源中间件    | 可用于分布式项目调度         | 依赖mysql                 |
-| Quartz                   | OpenSymphony 开源组织 | 一些中间件常常基于Quartz开发 |                           |
-| Elastic-Job              |      当当⽹开源      | 可用于分布式项目调度         | 需要依赖ZooKeeper + Mesos |
-| Apache DolphinScheduler  |       易观开源       | 大数据任务调度               |                           |
+| 技术                     |         来源         | 使用场景                        | 依赖第三方                |
+| -------------------------- | :---------------------: | --------------------------------- | --------------------------- |
+| Timer                    |        JDK自带        | 目前比较少使用                  |                           |
+| ScheduledExecutorService |        JDK自带        | 基于线程池技术，常用于中间件中  |                           |
+| Spring Task              |    Spring-context    | Spring 项目，常用于单体应用开发 |                           |
+| XXL-JOB                  |    国产开源中间件    | 可用于分布式项目调度            | 依赖mysql                 |
+| Quartz                   | OpenSymphony 开源组织 | 一些中间件常常基于Quartz开发    |                           |
+| Elastic-Job              |      当当⽹开源      | 可用于分布式项目调度            | 需要依赖ZooKeeper + Mesos |
+| Apache DolphinScheduler  |       易观开源       | 大数据任务调度                  |                           |
 
 本文对部分技术的实现进行了介绍，从简单到复杂，从具体到抽象，希望可以让大家在面对一个任务调度框架时可以快速抓住要点，不再陌生。
 
 # 1. Timer
 
-java.util.Timer位于JDK的rt.jar包下，始于jdk1.3，是JDK自带的任务调度器，虽然目前基本不再使用Timer来进行任务调度，但是Timer设计简单，理解起来比较容易。而且后续ScheduledExecutorService的基本原理和Timer基本类似，因此需要对Timer进行一个详细的了解。Timer的核心类比较少，只需要以下4个类即可。
+java.util.Timer位于JDK的rt.jar包下，始于jdk1.3，是JDK自带的任务调度器，虽然目前基本不再使用Timer来进行任务调度，但是Timer设计简单，理解起来比较容易。而且后续ScheduledExecutorService的基本原理和Timer基本类似，因此需要对Timer进行一个详细的了解。
+
+Timer的核心类比较少，只需要以下4个类即可。
 
 
-| 类          | 功能                                                | 说明                                          |
-| ------------- | ----------------------------------------------------- | ----------------------------------------------- |
-| Timer       | 入口类，整个调度器的组织者                          | 定义了多个提交task的方法                      |
-| TimerThread | 启动执行任务的线程，继承了java.lang.Thread          | 一个轮询方法，核心方法为mainLoop()。          |
-| TimerTask   | 抽象类，通过实现该类的抽象方法（run）来实现业务逻辑 | 核心属性：nextExecutionTime下一个执行时间点。 |
-| TaskQueue   | 任务队列                                            | 优先队列，头部节点为最早执行的Task            |
+| 类          | 功能                                          | 说明                                             |
+| ------------- | ----------------------------------------------- | -------------------------------------------------- |
+| Timer       | 入口类，整个调度器的组织者，相当于其他框架的. | 定义了多个提交task的方法                         |
+| TimerThread | 任务调度器                                    | 后台线程执行一个轮询方法，核心方法为mainLoop()。 |
+| TimerTask   | 抽象类，其实现类包装业务逻辑                  | 核心属性：nextExecutionTime下一个执行时间点。    |
+| TaskQueue   | 任务队列                                      | 优先队列，头部节点为最早执行的Task               |
 
 以上类都处于java.util包下。
 
@@ -47,12 +49,12 @@ java.util.Timer位于JDK的rt.jar包下，始于jdk1.3，是JDK自带的任务�
 >> 时间复杂度为O(n)，一些时间没到的任务也被遍历到了。性能不好。
 >>
 >
-> **方案2.** 先对所有的任务，按照下次执行时间的大小进行排序，每次只取头部任务，即时间最小的任务进行时间判断，如果小于当前时间，则执行任务。
+> **方案2.** 先对所有的任务，按照下次执行时间的大小进行排序，每次只取头部任务。
 >
 >> 对2进行分析可以发现，只要保证队列头部为最早执行的元素即可，对于其他任务，因为还不需要执行，是否有序并不重要。
 >>
 >
-> **方案3.** 采用优先队列可以满足排序要求，部分有序，头部为权值最小，每次取权值即可。
+> **方案3.** 采用优先队列，头部为权值最小，每次取权值即可。
 
 从以上分析可以看出，一个任务框架，可以采用优先队列来容纳提交的任务。Timer正是如此，它的基本数据结构为平衡二叉堆(balanced binary heap)。想要理解Timer，需要对平衡二叉堆进行了解。
 详细可以参考  [【Java基础】JAVA中优先队列详解](https://www.cnblogs.com/satire/p/14919342.html) 。 摘抄如下：
@@ -142,7 +144,7 @@ private void siftDown(int k, E x) {
 
 ## 1.2 Timer 核心执行逻辑
 
-Timer 提交任务的方法有6个
+查看Timer类的结构，可以看到提交任务的方法有6个
 
 ![Timer核心方法](./assets/JAVA任务调度技术-1645453762685.png)
 
@@ -437,8 +439,6 @@ public abstract class TimerTask implements Runnable {
 > - 假设前序任务抛出了非InterruptedException的异常，则整个队列将会被清空，任务调度终止。
 
 基于以上局限性，在实际应用中，使用Timer使用得并不多。常用的为 ScheduledExecutorService。ScheduledExecutorService与Timer 的最大区别是将任务提交给线程池处理。
-
-
 
 # 2. ScheduledExecutorService
 
@@ -747,7 +747,6 @@ ScheduledExecutorService 和 Timer 比较
 
 但是ScheduledExecutorService也有一定的局限性，那就是任务只能执行一次或者以固定的时间差周期性执行。不够灵活。
 
-
 # 3 Spring Task
 
 Spring Task处于spring-context项目的org.springframework.scheduling包下。可以通过注解的方式，将Spring bean中的某个方法变成一个task，非常方便。而且引入了cron表达式，使用更加灵活。
@@ -910,11 +909,11 @@ public class ScheduledAnnotationBeanPostProcessor
    
    //这部分主要是从Spring中获取配置的 scheduler 只保留核心代码
    private void finishRegistration() {
-       
+   
       if (this.scheduler != null) {
          this.registrar.setScheduler(this.scheduler);
       }
-       
+   
        if (this.beanFactory instanceof ListableBeanFactory) {
          Map<String, SchedulingConfigurer> beans =
                  ((ListableBeanFactory) this.beanFactory).getBeansOfType(SchedulingConfigurer.class);
@@ -965,20 +964,19 @@ public class ScheduledAnnotationBeanPostProcessor
 
 从 ScheduledAnnotationBeanPostProcessor 源码可以看出，经过处理后，所有的任务和执行器都存放于ScheduledTaskRegistrar中。通过调用afterPropertiesSet()来启动任务。总结来说，做了以下3件事情
 
-> 1、将被注解的方法封装成为 Task。    
-> 2、从容器中查找合适的 TaskScheduler。    
-> 3、将1和2都存到ScheduledTaskRegistrar。    
+> 1、将被注解的方法封装成为 Task。
+> 2、从容器中查找合适的 TaskScheduler。
+> 3、将1和2都存到ScheduledTaskRegistrar。
 
 其中查找 TaskScheduler 的来源分为4个。
 
-> 1、调用ScheduledAnnotationBeanPostProcessor实例的set方法。    
-> 2、配置SchedulingConfigurer实现类到spring容器中。    
-> 3、配置 TaskScheduler 实现类 到spring容器中。    
+> 1、调用ScheduledAnnotationBeanPostProcessor实例的set方法。
+> 2、配置SchedulingConfigurer实现类到spring容器中。
+> 3、配置 TaskScheduler 实现类 到spring容器中。
 > 4、配置ScheduledExecutorService实现类到Spring 容器中。
-> 5、在1-4都没有做的情况下ScheduledTaskRegistrar会直接调用 Executors.newSingleThreadScheduledExecutor()获取一个ScheduledExecutorService。   
+> 5、在1-4都没有做的情况下ScheduledTaskRegistrar会直接调用 Executors.newSingleThreadScheduledExecutor()获取一个ScheduledExecutorService。
 
 其中1-4在 ScheduledAnnotationBeanPostProcessor 中实现， 5在ScheduledTaskRegistrar中实现。
-
 
 ## 3.5 ScheduledTaskRegistrar 类
 
@@ -1197,19 +1195,21 @@ public class Application2 {
 
 # 4 XXL-JOB
 
-XXL-JOB是一个分布式任务调度平台，其核心设计目标是开发迅速、学习简单、轻量级、易扩展。现已开放源代码并接入多家公司线上产品线，开箱即用。
-由于是国产开发的，中文文档，而且很全面，可以直接看官方文档 [《分布式任务调度平台XXL-JOB》-官方文档](https://www.xuxueli.com/xxl-job/) 。
-另外，最初作者使用的底层框架是Quartz，后来发现Quartz太过麻烦，自研了一个调度器，简单但是很实用，很值得学习。
+XXL-JOB是一个分布式任务调度平台，其核心设计目标是开发迅速、学习简单、轻量级、易扩展。现已开放源代码并接入多家公司线上产品线，开箱即用。由于是国产开发的，中文文档，而且很全面，具体使用方法可以直接看官方文档 [《分布式任务调度平台XXL-JOB》-官方文档](https://www.xuxueli.com/xxl-job/) 。
+
+最初XXL-JOB的底层是Quartz，后来发现Quartz比较复杂，不利于扩展和维护，因此自研了一个调度器，简单但是很实用，很值得学习。
 
 ## 4.1 为什么我们需要一个分布式的调度平台
 
-前面介绍的Timer, ScheduledExcutorService 和 Spring Task，都是针对单个实例内的任务调度。假设有一个任务A，是给用户发送消息的，设置每一秒执行一次，如果部署了3个实例，那么就会变成每秒执行3次，可能会导致并发问题。此外在实际的业务中，我们还有可能需要随时调整调度周期，随时停止和启动一个任务等。因此在分布式系统中，有一个分布式调度器尤为重要。
+前面介绍的Timer, ScheduledExcutorService 和 Spring Task，都是针对单个实例内的任务调度，在分布式部署的时候，可能会有一定的问题。比如假设有一个任务A，是给用户发送消息的，设置每一秒执行一次，如果部署了3个实例，那么就会变成每秒执行3次，调度频率随着实例的增多而增多，如果没有加全局锁，会出现重复发送的问题。此外在实际的业务中，我们还有可能需要随时JOB的调度周期，随时停止和启动一个任务等，这些操作都需要发版才能实现。因此在分布式系统中，有一个分布式调度器尤为重要。
 
 ## 4.2 XXL-JOB 的模块
 
-从[github](https://github.com/xuxueli/xxl-job/) 上下载源码，可以看到XXL-JOB的核心模块分为2个。另外xxl-job-executor-samples是一个demo模块
+从[github](https://github.com/xuxueli/xxl-job/) 上下载源码，可以看到XXL-JOB的核心模块分为2个，xxl-job-admin 和 xxl-job-core。另外的xxl-job-executor-samples是一个例子模块
 
 ![xxl-job模块](./assets/JAVA任务调度技术-xxl-job模块-1645156061685.png)
+
+核心模块的作用如下：
 
 
 | 模块          | 说明               | 功能                       |
@@ -1217,47 +1217,43 @@ XXL-JOB是一个分布式任务调度平台，其核心设计目标是开发迅�
 | xxl-job-admin | 服务端（调度中心） | 管理界面+任务调度          |
 | xxl-job-core  | 客户端（执行器）   | 在项目中引用，执行业务逻辑 |
 
+从模块划分可以看出，xxl-job的任务调度和任务的执行是分开的，客户端只管执行任务，不用管任务单的调度。任务调度是由服务端执行，这样各司其职，进行了解耦，提高系统整体稳定性和扩展性
+
 官方架构图
 ![官方架构图](./assets/JAVA任务调度技术-1645426939228.png)
 
-简化版
+如果大家心中没有任务调度的概念，直接看官方架构图是有些吃力的，因此我做了简化，保留了核心部分，如下图：
 
-![xxl-job客户端和服务端交互示意图.png](./assets/1645627791745-image.png)
+![image.png](./assets/1645712986102-image.png)
 
-XXL-JOB的特点： “调度”和“任务”两部分可以相互解耦，提高系统整体稳定性和扩展性
+从上图可以看出，XXL-JOB框架分为三个结构。
 
-## 4.3 XXL-JOB 服务端 xxl-job-admin
+> 1、Mysql：存储相关信息
+> 2、客户端：将自己注册到服务端，等待任务下发。
+> 3、服务端：维护JOB的信息，将需要执行的JOB，通过一定的策略，找到对应的客户端地址，发送HTTP请求，客户端执行即可。
+
+## 4.3 xxl-job-admin 解析
 
 **服务端**核心类如下：
 
 
-| 类                   | 功能                                                  | 说明 |
-| ---------------------- | ------------------------------------------------------- | ------ |
-| JobScheduleHelper    | 将需要执行的JOB提交到线程池                           |      |
-| XxlJobInfo           | 实体类记录了一个任务的配置，持久化到mysql中           |      |
-| JobTriggerPoolHelper | 定义了两个线程池，用户接受JobScheduleHelper提交的任务 |      |
-| JobRegistryHelper    | 注册中心 ，接收客户端的注册和心跳                     |      |
+| 类                   | 功能                                             |
+| ---------------------- | -------------------------------------------------- |
+| JobScheduleHelper    | 调度器，将需要执行的JOB提交到线程池              |
+| XxlJobInfo           | 实体类，记录了一个任务的配置，持久化到mysql中    |
+| JobTriggerPoolHelper | 线程池，多个线程发送job到客户端                  |
+| XxlJobTrigger        | 触发器， 真正处理 XxlJobInfo并发送到制定的客户端 |
+| JobRegistryHelper    | 注册中心 ，接收客户端的注册和心跳                |
 
 以上类处于com.xxl.job.admin.core包
 
-```java
+### 4.3.1 服务端初始化入口
 
-```
+admin的初始化入口在XxlJobAdminConfig，是InitializingBean的实现类，因此在spring配置文件初始化完成后就触发了XXL-JOB的初始化
 
-### 4.3.1 初始化入口
-
-admin的初始化入口在XxlJobAdminConfig，从里面可以看到
 ```java
 @Component
 public class XxlJobAdminConfig implements InitializingBean, DisposableBean {
-
-    private static XxlJobAdminConfig adminConfig = null;
-    public static XxlJobAdminConfig getAdminConfig() {
-        return adminConfig;
-    }
-
-
-    // ---------------------- XxlJobScheduler ----------------------
 
     private XxlJobScheduler xxlJobScheduler;
 
@@ -1272,9 +1268,10 @@ public class XxlJobAdminConfig implements InitializingBean, DisposableBean {
 }
 ```
 
+从上边可以看到，真正执行初始化的类是XxlJobScheduler，初始化逻辑在init()方法中。
+
 ```java
 public class XxlJobScheduler  {
-    private static final Logger logger = LoggerFactory.getLogger(XxlJobScheduler.class);
 
    //启动了一些列的线程或者线程池来来处理相关逻辑
     public void init() throws Exception {
@@ -1298,34 +1295,31 @@ public class XxlJobScheduler  {
 
         // start-schedule  ( depend on JobTriggerPoolHelper )
         JobScheduleHelper.getInstance().start();
-
-        logger.info(">>>>>>>>> init xxl-job admin success.");
     }
+    //省略。。。
 }
 ```
+
+服务端初始化流程图如下：
+
+![xxl-job-服务端-初始化步骤.png](./assets/JAVA任务调度技术-1645425368228.png)
+
+XXL-JOB服务端在初始化过程中启动了多个后台线程或者线程池，用于异步处理多项任务。
 
 ### 4.3.2 JobScheduleHelper 类
 
 从前面对任务调度的介绍可以看出，一个任务调度器，离不开
 
-> 1.一个带有执行时间的任务
+> 1.带有执行时间的任务列表
 > 2.轮询执行任务的调度器
 
 XXL-JOB 也不例外。其中JobScheduleHelper类就属于轮询执行任务的调度器，包含了任务调用的基本逻辑，属于必看的类
-
-源码逻辑解析
-![xxl-job-JobScheduleHelper.png](./assets/JAVA任务调度技术-1645410062917.png)
-
-从以上逻辑看，XXL-JOB的核心逻辑与JDK的 ScheduledExecutorService 是基本类似的。都是先从一个队列（xxl-job是使用mysql排序）中取出JOB，然后提交给线程池处理。
-
-但有一点区别：XXL-JOB是从数据库读取数据，因此为了提高性能，做了一个预读5秒的变化。未到时间执行的job提交给时间轮，再由时间轮提交给线程池处理。
 
 具体代码如下
 
 ```java
 
 public class JobScheduleHelper {
-    //忽略部分代码
     //预读5秒
     public static final long PRE_READ_MS = 5000;    // pre read
     //时间轮刻度-任务ID映射表
@@ -1369,7 +1363,7 @@ public class JobScheduleHelper {
 
                                     // 1、超时触发策略
                                     MisfireStrategyEnum misfireStrategyEnum = MisfireStrategyEnum.match(jobInfo.getMisfireStrategy(), MisfireStrategyEnum.DO_NOTHING);
-              
+  
                                     if (MisfireStrategyEnum.FIRE_ONCE_NOW == misfireStrategyEnum) {
                                         // FIRE_ONCE_NOW 》 trigger
                                         JobTriggerPoolHelper.trigger(jobInfo.getId(), TriggerTypeEnum.MISFIRE, -1, null, null, null);
@@ -1444,6 +1438,13 @@ public class JobScheduleHelper {
 
 ```
 
+源码逻辑解析
+![xxl-job-JobScheduleHelper.png](./assets/JAVA任务调度技术-1645410062917.png)
+
+从以上逻辑看，XXL-JOB的核心逻辑与JDK的 ScheduledExecutorService 是基本类似的。都是先从一个队列（xxl-job是使用mysql排序）中取出JOB，然后提交给线程池处理。
+
+但有一点区别：XXL-JOB是从数据库读取数据，因此为了提高性能，做了一个预读5秒的变化。未到时间执行的job提交给时间轮，再由时间轮提交给线程池处理。
+
 ### 4.3.3  XxlJobTrigger 类
 
 经过JobScheduleHelper调度，job的参数会被提交的线程池，线程池由JobTriggerPoolHelper实现，比较简单，不再描述，然后最终会使用 XxlJobTrigger 是触发执行job的地方。
@@ -1468,7 +1469,7 @@ public class XxlJobTrigger {
             jobInfo.setExecutorParam(executorParam);
         }
         int finalFailRetryCount = failRetryCount>=0?failRetryCount:jobInfo.getExecutorFailRetryCount();
-        
+  
         // 2 从数据库获取分组信息（本质就是获取接收job的地址）
         XxlJobGroup group = XxlJobAdminConfig.getAdminConfig().getXxlJobGroupDao().load(jobInfo.getJobGroup());
 
@@ -1528,7 +1529,7 @@ public class XxlJobTrigger {
         jobLog.setJobGroup(jobInfo.getJobGroup());
         jobLog.setJobId(jobInfo.getId());
         jobLog.setTriggerTime(new Date());
-        
+  
         //记录日志
         XxlJobAdminConfig.getAdminConfig().getXxlJobLogDao().save(jobLog);
 
@@ -1576,15 +1577,15 @@ public class XxlJobTrigger {
         } else {
             triggerResult = new ReturnT<String>(ReturnT.FAIL_CODE, null);
         }
-        
+  
         // 5、collection trigger info
         //忽略一长串组装日志代码
-       
+   
         //保存日志
         XxlJobAdminConfig.getAdminConfig().getXxlJobLogDao().updateTriggerInfo(jobLog);
     }
 
-    
+  
     //根据地址url，将参数发送到指定的客户端。
     public static ReturnT<String> runExecutor(TriggerParam triggerParam, String address){
         ReturnT<String> runResult = null;
@@ -1611,21 +1612,45 @@ public class XxlJobTrigger {
 
 总结以上XxlJobTrigger类的代码，做了几件事
 
->1、根据jobId从数据库获取job参数
-2、根据job参数获取groupId后，再获取分组信息，里面包含了分组中的客户端 ip:port地址。
-3、根据路由策略，获取指定的address，将job参数通过http发送往客户端。
-4、记录日志。
-
+> 1、根据jobId从数据库获取job参数
+> 2、根据job参数获取groupId后，再获取分组信息，里面包含了分组中的客户端 ip:port地址。
+> 3、根据路由策略，获取指定的address，将job参数通过http发送往客户端。
+> 4、记录日志。
 
 ### 4.3.4 JobRegistryHelper 类
+
 客户端会定时上报自身的ip+port，JobRegistryHelper就是专门处理这些信息的。
 实现类比较简单，就补贴源码了，只讲一下逻辑。
 1、定义了一个线程池，专门保存或者修改用来处理客户端上报的address。
 2、定义了一个后台线程，周期性（30s）处理以下逻辑：清除过期的客户端注册信息（30*3s不上报），将最新的address更新到各自的任务组中。
 
-### 4.3.5 服务端整体初始化逻辑
+### 4.3.4 路由策略
 
-![xxl-job-服务端-初始化步骤.png](./assets/JAVA任务调度技术-1645425368228.png)
+路由策略抽象类为 ExecutorRouter，在配置job的时候指定的路由策略，就有对应的ExecutorRouter子类去实现。
+
+```java
+public abstract class ExecutorRouter {
+
+    /**
+     * route address
+     * @param addressList
+     * @return  ReturnT.content=address
+     */
+    public abstract ReturnT<String> route(TriggerParam triggerParam, List<String> addressList);
+
+}
+```
+
+> 1、第一个：直接取addressList第一个地址
+> 2、最后一个：直接取 addressList最后地址
+> 3、轮询: 对调度次数进行计数n，n%addressList.size获取地址下标。
+> 4、随机: 随机取一个。
+> 5、一致性hash: 使用java.util.TreeMap.tailMap()方法来实现。[负载均衡之一致性哈希环算法](http://betheme.net/news/txtlist_i105436v.html)
+> 6、最不经常使用：LFU(Least Frequently Used)：最不经常使用，频率/次数
+> 7、最近最久未使用：LRU(Least Recently Used)：最近最久未使用，时间
+> 8、故障转移：对addressList进行循环http请求，第一个正常返回的地址作为调度地州。
+> 9、忙碌转移：通过http请求客户端检查JobThread，第一个空闲的客户端作为调度客户端。
+> 10、分片广播：发送给所有的客户端。
 
 ## 4.4 客户端逻辑
 
@@ -1634,38 +1659,533 @@ public class XxlJobTrigger {
 ![xxl-job-客户端-初始化步骤.png](./assets/JAVA任务调度技术-1645426033285.png)
 
 
-| 类               | 功能        | 说明                                                                                 |
-|-----------------|-----------|------------------------------------------------------------------------------------|
-| XxlJob          | Task注解    | 被标注的方法将会被处理成为 IJobHandler, 与@Scheduled注解功能相似 （19年底新增注解）。 每个IJobHandler有唯标识         |
-| EmbedServer     | 客户端server | 启动一个netty,用于接收服务端的调度                                                               |
-| ExecutorBizImpl | 处理服务端的请求  | EmbedServer接收请求后，实际交给ExecutorBizImpl进行处理，里面有处理阻塞策略                                 |
-| TriggerParam    | 触发参数      | 记录服务端发送过来的任务                                                                       |
-| JobThread       | Job线程     | 用 LinkedBlockingQueue 缓存服务端传递过来的 TriggerParam。轮询 LinkedBlockingQueue，顺序处理同一个job的任务 |
-| IJobHandler     | Task抽象类   | 被@XxlJob的注释的方法，或者通过服务端传递过来的代码，将会封装成为一个  IJobHandler    实现类                         |
-| XxlJobContext   | 上下文       | 内置InheritableThreadLocal，在线程中存储变量，供给IJobHandler                                    |
+| 类              | 功能             | 说明                                                                                                          |
+| ----------------- | ------------------ | --------------------------------------------------------------------------------------------------------------- |
+| XxlJob          | Task注解         | 被标注的方法将会被处理成为 IJobHandler, 与@Scheduled注解功能相似 （19年底新增注解）。 每个IJobHandler有唯标识 |
+| EmbedServer     | 客户端server     | 启动一个netty,用于接收服务端的调度                                                                            |
+| ExecutorBizImpl | 处理服务端的请求 | EmbedServer接收请求后，实际交给ExecutorBizImpl进行处理，里面有处理阻塞策略                                    |
+| TriggerParam    | 触发参数         | 记录服务端发送过来的任务                                                                                      |
+| JobThread       | Job线程          | 用 LinkedBlockingQueue 缓存服务端传递过来的 TriggerParam。轮询 LinkedBlockingQueue，顺序处理同一个job的任务   |
+| IJobHandler     | Task抽象类       | 被@XxlJob的注释的方法，或者通过服务端传递过来的代码，将会封装成为一个  IJobHandler    实现类                  |
+| XxlJobContext   | 上下文           | 内置InheritableThreadLocal，在线程中存储变量，供给IJobHandler                                                 |
 
 从以上表格基本可以看出客户端的执行逻辑，其中比较重要的是 ExecutorBizImpl 和 JobThread，以及XxlJob注解的原理。 将会对这三个类进行介绍。
 
+### 4.4.1 @XxlJob 注解原理
 
+在客户端引入XXL-JOB的时候，一般需要进行如下配置
+
+```java
+    @Bean
+    public XxlJobSpringExecutor xxlJobExecutor() {
+        logger.info(">>>>>>>>>>> xxl-job config init.");
+        XxlJobSpringExecutor xxlJobSpringExecutor = new XxlJobSpringExecutor();
+        xxlJobSpringExecutor.setAdminAddresses(adminAddresses);
+        xxlJobSpringExecutor.setAppname(appname);
+        xxlJobSpringExecutor.setAddress(address);
+        xxlJobSpringExecutor.setIp(ip);
+        xxlJobSpringExecutor.setPort(port);
+        xxlJobSpringExecutor.setAccessToken(accessToken);
+        xxlJobSpringExecutor.setLogPath(logPath);
+        xxlJobSpringExecutor.setLogRetentionDays(logRetentionDays);
+        return xxlJobSpringExecutor;
+    }
+```
+
+查看XxlJobSpringExecutor 具体代码如下
+
+```java
+public class XxlJobSpringExecutor extends XxlJobExecutor implements ApplicationContextAware, SmartInitializingSingleton, DisposableBean {
+
+    // start
+    @Override
+    public void afterSingletonsInstantiated() {
+
+        // init JobHandler Repository (for method)
+        initJobHandlerMethodRepository(applicationContext);
+
+        // refresh GlueFactory
+        GlueFactory.refreshInstance(1);
+
+        // super start
+        try {
+            super.start();
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+  
+    //通过Spring的ApplicationContext，获取到使用了@XxlJob注解的类，缓存起来。
+    private void initJobHandlerMethodRepository(ApplicationContext applicationContext) {
+        if (applicationContext == null) {
+            return;
+        }
+        // init job handler from method
+        String[] beanDefinitionNames = applicationContext.getBeanNamesForType(Object.class, false, true);
+        for (String beanDefinitionName : beanDefinitionNames) {
+            Object bean = applicationContext.getBean(beanDefinitionName);
+
+            Map<Method, XxlJob> annotatedMethods = null;   // referred to ：org.springframework.context.event.EventListenerMethodProcessor.processBean
+            try {
+                annotatedMethods = MethodIntrospector.selectMethods(bean.getClass(),
+                        new MethodIntrospector.MetadataLookup<XxlJob>() {
+                            @Override
+                            public XxlJob inspect(Method method) {
+                                return AnnotatedElementUtils.findMergedAnnotation(method, XxlJob.class);
+                            }
+                        });
+            } catch (Throwable ex) {
+                logger.error("xxl-job method-jobhandler resolve error for bean[" + beanDefinitionName + "].", ex);
+            }
+            if (annotatedMethods==null || annotatedMethods.isEmpty()) {
+                continue;
+            }
+
+            for (Map.Entry<Method, XxlJob> methodXxlJobEntry : annotatedMethods.entrySet()) {
+                Method executeMethod = methodXxlJobEntry.getKey();
+                XxlJob xxlJob = methodXxlJobEntry.getValue();
+                // 父类核心方法
+                registJobHandler(xxlJob, bean, executeMethod);
+            }
+        }
+    }
+
+  
+
+}
+```
+
+继续看父类XxlJobExecutor，可以看到使用一个ConcurrentMap缓存了包装过的业务方法。其中key为每个job的唯一标识，与服务端的key一一对应。
+
+```java
+public class XxlJobExecutor {
+    //使用一个ConcurrentMap缓存了包装过的业务方法。其中key为每个job的唯一标识，与服务端的key一一对应。
+    private static ConcurrentMap<String, IJobHandler> jobHandlerRepository = new ConcurrentHashMap<String, IJobHandler>();
+
+    protected void registJobHandler(XxlJob xxlJob, Object bean, Method executeMethod){
+        if (xxlJob == null) {
+            return;
+        }
+
+        String name = xxlJob.value();
+        //make and simplify the variables since they'll be called several times later
+        Class<?> clazz = bean.getClass();
+        String methodName = executeMethod.getName();
+        if (name.trim().length() == 0) {
+            throw new RuntimeException("xxl-job method-jobhandler name invalid, for[" + clazz + "#" + methodName + "] .");
+        }
+        if (loadJobHandler(name) != null) {
+            throw new RuntimeException("xxl-job jobhandler[" + name + "] naming conflicts.");
+        }
+
+   
+
+        executeMethod.setAccessible(true);
+
+        // init and destroy
+        Method initMethod = null;
+        Method destroyMethod = null;
+        //初始化代码
+        if (xxlJob.init().trim().length() > 0) {
+            try {
+                initMethod = clazz.getDeclaredMethod(xxlJob.init());
+                initMethod.setAccessible(true);
+            } catch (NoSuchMethodException e) {
+                throw new RuntimeException("xxl-job method-jobhandler initMethod invalid, for[" + clazz + "#" + methodName + "] .");
+            }
+        }
+        //销毁代码
+        if (xxlJob.destroy().trim().length() > 0) {
+            try {
+                destroyMethod = clazz.getDeclaredMethod(xxlJob.destroy());
+                destroyMethod.setAccessible(true);
+            } catch (NoSuchMethodException e) {
+                throw new RuntimeException("xxl-job method-jobhandler destroyMethod invalid, for[" + clazz + "#" + methodName + "] .");
+            }
+        }
+
+        // registry jobhandler
+        registJobHandler(name, new MethodJobHandler(bean, executeMethod, initMethod, destroyMethod));
+
+    }
+    public static IJobHandler registJobHandler(String name, IJobHandler jobHandler){
+        logger.info(">>>>>>>>>>> xxl-job register jobhandler success, name:{}, jobHandler:{}", name, jobHandler);
+        return jobHandlerRepository.put(name, jobHandler);
+    }
+}
+```
+
+最终包装成为了MethodJobHandler
+
+```java
+public class MethodJobHandler extends IJobHandler {
+
+    private final Object target;
+    private final Method method;
+    private Method initMethod;
+    private Method destroyMethod;
+}
+```
+
+以上流程总结如下
+
+> 在spring启动，所有单例类都创建完成后，触发从ApplicationContext获取所有标注了 @XxlJob的bean和对应方法。最终封装成为MethodJobHandler，存储到了了一个ConcurrentMap中。key为JOB的唯一标识，与服务端一对一对应。等待服务端的调用。
+
+### 4.4.2 JobThread
+
+从@XxlJob的原理，可以看到，一个job最终会被封装成为MethodJobHandler，那么客户端如何处理服务端下发的调度任务呢。
+J
+obThread是真正客户端真正执行任务的地方。每一个JAVA类型的JOB都会对应一个JobThread。
+
+```java
+public class JobThread extends Thread{
+	private static Logger logger = LoggerFactory.getLogger(JobThread.class);
+
+	private int jobId;
+    //标注了@XxlJob的方法或者从前端传过来的代码脚本。
+	private IJobHandler handler;
+    // 存储服务端穿过来的请求，如果前一个任务没有执行文，后续的会继续存在这里。
+	private LinkedBlockingQueue<TriggerParam> triggerQueue;
+    // 服务端每发送一次到客户端，会生成一个唯一的JOBid，可以用来做幂等，防止HTTP请求重试等造成重复调用。
+	private Set<Long> triggerLogIdSet;
+
+	private volatile boolean toStop = false;
+	private String stopReason;
+
+    private boolean running = false;    // if running job
+	private int idleTimes = 0;			// idel times
+
+
+	public JobThread(int jobId, IJobHandler handler) {
+		this.jobId = jobId;
+		this.handler = handler;
+		this.triggerQueue = new LinkedBlockingQueue<TriggerParam>();
+		this.triggerLogIdSet = Collections.synchronizedSet(new HashSet<Long>());
+
+		// assign job thread name
+		this.setName("xxl-job, JobThread-"+jobId+"-"+System.currentTimeMillis());
+	}
+	public IJobHandler getHandler() {
+		return handler;
+	}
+
+    //存储服务端调度请求
+	public ReturnT<String> pushTriggerQueue(TriggerParam triggerParam) {
+		// avoid repeat
+		if (triggerLogIdSet.contains(triggerParam.getLogId())) {
+			logger.info(">>>>>>>>>>> repeate trigger job, logId:{}", triggerParam.getLogId());
+			return new ReturnT<String>(ReturnT.FAIL_CODE, "repeate trigger job, logId:" + triggerParam.getLogId());
+		}
+
+		triggerLogIdSet.add(triggerParam.getLogId());
+		triggerQueue.add(triggerParam);
+        return ReturnT.SUCCESS;
+	}
+
+   //杀死调度任务
+	public void toStop(String stopReason) {
+		/**
+		 * Thread.interrupt只支持终止线程的阻塞状态(wait、join、sleep)，
+		 * 在阻塞出抛出InterruptedException异常,但是并不会终止运行的线程本身；
+		 * 所以需要注意，此处彻底销毁本线程，需要通过共享变量方式；
+		 */
+		this.toStop = true;
+		this.stopReason = stopReason;
+	}
+
+    //启动线程
+    @Override
+	public void run() {
+
+    	// init
+    	try {
+			handler.init();
+		} catch (Throwable e) {
+    		logger.error(e.getMessage(), e);
+		}
+
+		// 死循环知道停止
+		while(!toStop){
+			running = false;
+            //统计空闲次数 超过30次就终止线程
+			idleTimes++;
+
+            TriggerParam triggerParam = null;
+            try {
+				// to check toStop signal, we need cycle, so wo cannot use queue.take(), instand of poll(timeout)
+				triggerParam = triggerQueue.poll(3L, TimeUnit.SECONDS);
+				if (triggerParam!=null) {
+					running = true;
+					idleTimes = 0;
+					triggerLogIdSet.remove(triggerParam.getLogId());
+
+					// 创建日志文件，用于存储日志，日志异步上报。
+					String logFileName = XxlJobFileAppender.makeLogFileName(new Date(triggerParam.getLogDateTime()), triggerParam.getLogId());
+					XxlJobContext xxlJobContext = new XxlJobContext(
+							triggerParam.getJobId(),
+							triggerParam.getExecutorParams(),
+							logFileName,
+							triggerParam.getBroadcastIndex(),
+							triggerParam.getBroadcastTotal());
+
+					// 初始化上下文，使用InheritableThreadLocal保存
+					XxlJobContext.setXxlJobContext(xxlJobContext);
+
+					// execute
+					XxlJobHelper.log("<br>----------- xxl-job job execute start -----------<br>----------- Param:" + xxlJobContext.getJobParam());
+
+					if (triggerParam.getExecutorTimeout() > 0) {
+						// 设定调度过期时间
+						Thread futureThread = null;
+						try {
+							FutureTask<Boolean> futureTask = new FutureTask<Boolean>(new Callable<Boolean>() {
+								@Override
+								public Boolean call() throws Exception {
+
+									// init job context
+									XxlJobContext.setXxlJobContext(xxlJobContext);
+
+									handler.execute();
+									return true;
+								}
+							});
+							futureThread = new Thread(futureTask);
+							futureThread.start();
+
+							Boolean tempResult = futureTask.get(triggerParam.getExecutorTimeout(), TimeUnit.SECONDS);
+						} catch (TimeoutException e) {
+
+							XxlJobHelper.log("<br>----------- xxl-job job execute timeout");
+							XxlJobHelper.log(e);
+
+							// handle result
+							XxlJobHelper.handleTimeout("job execute timeout ");
+						} finally {
+							futureThread.interrupt();
+						}
+					} else {
+						//没有过期时间，直接执行
+						handler.execute();
+					}
+
+					// 处理执行结果
+					if (XxlJobContext.getXxlJobContext().getHandleCode() <= 0) {
+						XxlJobHelper.handleFail("job handle result lost.");
+					} else {
+						String tempHandleMsg = XxlJobContext.getXxlJobContext().getHandleMsg();
+						tempHandleMsg = (tempHandleMsg!=null&&tempHandleMsg.length()>50000)
+								?tempHandleMsg.substring(0, 50000).concat("...")
+								:tempHandleMsg;
+						XxlJobContext.getXxlJobContext().setHandleMsg(tempHandleMsg);
+					}
+					XxlJobHelper.log("<br>----------- xxl-job job execute end(finish) -----------<br>----------- Result: handleCode="
+							+ XxlJobContext.getXxlJobContext().getHandleCode()
+							+ ", handleMsg = "
+							+ XxlJobContext.getXxlJobContext().getHandleMsg()
+					);
+
+				} else {
+					if (idleTimes > 30) {
+						if(triggerQueue.size() == 0) {	// avoid concurrent trigger causes jobId-lost
+							XxlJobExecutor.removeJobThread(jobId, "excutor idel times over limit.");
+						}
+					}
+				}
+			} catch (Throwable e) {
+				if (toStop) {
+					XxlJobHelper.log("<br>----------- JobThread toStop, stopReason:" + stopReason);
+				}
+
+				// handle result
+				StringWriter stringWriter = new StringWriter();
+				e.printStackTrace(new PrintWriter(stringWriter));
+				String errorMsg = stringWriter.toString();
+
+				XxlJobHelper.handleFail(errorMsg);
+
+				XxlJobHelper.log("<br>----------- JobThread Exception:" + errorMsg + "<br>----------- xxl-job job execute end(error) -----------");
+			} finally {
+                if(triggerParam != null) {
+                    // callback handler info
+                    if (!toStop) {
+                        // 提交处理结果到队列中，等待上报
+                        TriggerCallbackThread.pushCallBack(new HandleCallbackParam(
+                        		triggerParam.getLogId(),
+								triggerParam.getLogDateTime(),
+								XxlJobContext.getXxlJobContext().getHandleCode(),
+								XxlJobContext.getXxlJobContext().getHandleMsg() )
+						);
+                    } else {
+                        // 提交处理结果到队列中，等待上报
+                        TriggerCallbackThread.pushCallBack(new HandleCallbackParam(
+                        		triggerParam.getLogId(),
+								triggerParam.getLogDateTime(),
+								XxlJobContext.HANDLE_CODE_FAIL,
+								stopReason + " [job running, killed]" )
+						);
+                    }
+                }
+            }
+        }
+
+		// callback trigger request in queue
+		while(triggerQueue !=null && triggerQueue.size()>0){
+			TriggerParam triggerParam = triggerQueue.poll();
+			if (triggerParam!=null) {
+				// is killed
+				TriggerCallbackThread.pushCallBack(new HandleCallbackParam(
+						triggerParam.getLogId(),
+						triggerParam.getLogDateTime(),
+						XxlJobContext.HANDLE_CODE_FAIL,
+						stopReason + " [job not executed, in the job queue, killed.]")
+				);
+			}
+		}
+
+		// destroy
+		try {
+			handler.destroy();
+		} catch (Throwable e) {
+			logger.error(e.getMessage(), e);
+		}
+
+		logger.info(">>>>>>>>>>> xxl-job JobThread stoped, hashCode:{}", Thread.currentThread());
+	}
+}
+```
+
+![实现类](./assets/Java任务调度-xxl-job-1645763302635.png)
+
+### 4.4.3 ExecutorBizImpl
+
+客户端在启动后，会在EmbedServer实例中启动一个netty专门接收从服务端发送来的请求。其中包括检查服务端心跳，job线程心跳，终止调度，读取日志以及JOB调度等，都是交给ExecutorBizImpl进行处理。这里主要介绍下任务调度的过程：
+
+```java
+public class ExecutorBizImpl implements ExecutorBiz {
+
+    @Override
+    public ReturnT<String> run(TriggerParam triggerParam) {
+        // 根据id获取 JOB的执行线程JobThread
+        JobThread jobThread = XxlJobExecutor.loadJobThread(triggerParam.getJobId());
+        // 获取jobThread内部的 jobHandler
+        IJobHandler jobHandler = jobThread!=null?jobThread.getHandler():null;
+        String removeOldReason = null;
+
+        // valid：jobHandler + jobThread
+        GlueTypeEnum glueTypeEnum = GlueTypeEnum.match(triggerParam.getGlueType());
+        if (GlueTypeEnum.BEAN == glueTypeEnum) {
+
+            // new jobhandler
+            IJobHandler newJobHandler = XxlJobExecutor.loadJobHandler(triggerParam.getExecutorHandler());
+
+            // valid old jobThread
+            if (jobThread!=null && jobHandler != newJobHandler) {
+                // change handler, need kill old thread
+                removeOldReason = "change jobhandler or glue type, and terminate the old job thread.";
+
+                jobThread = null;
+                jobHandler = null;
+            }
+
+            // valid handler
+            if (jobHandler == null) {
+                jobHandler = newJobHandler;
+                if (jobHandler == null) {
+                    return new ReturnT<String>(ReturnT.FAIL_CODE, "job handler [" + triggerParam.getExecutorHandler() + "] not found.");
+                }
+            }
+
+        } else if (GlueTypeEnum.GLUE_GROOVY == glueTypeEnum) {
+
+            // valid old jobThread
+            if (jobThread != null &&
+                    !(jobThread.getHandler() instanceof GlueJobHandler
+                        && ((GlueJobHandler) jobThread.getHandler()).getGlueUpdatetime()==triggerParam.getGlueUpdatetime() )) {
+                // change handler or gluesource updated, need kill old thread
+                removeOldReason = "change job source or glue type, and terminate the old job thread.";
+
+                jobThread = null;
+                jobHandler = null;
+            }
+
+            // valid handler
+            if (jobHandler == null) {
+                try {
+                    IJobHandler originJobHandler = GlueFactory.getInstance().loadNewInstance(triggerParam.getGlueSource());
+                    jobHandler = new GlueJobHandler(originJobHandler, triggerParam.getGlueUpdatetime());
+                } catch (Exception e) {
+                    logger.error(e.getMessage(), e);
+                    return new ReturnT<String>(ReturnT.FAIL_CODE, e.getMessage());
+                }
+            }
+        } else if (glueTypeEnum!=null && glueTypeEnum.isScript()) {
+
+            // valid old jobThread
+            if (jobThread != null &&
+                    !(jobThread.getHandler() instanceof ScriptJobHandler
+                            && ((ScriptJobHandler) jobThread.getHandler()).getGlueUpdatetime()==triggerParam.getGlueUpdatetime() )) {
+                // change script or gluesource updated, need kill old thread
+                removeOldReason = "change job source or glue type, and terminate the old job thread.";
+
+                jobThread = null;
+                jobHandler = null;
+            }
+
+            // valid handler
+            if (jobHandler == null) {
+                jobHandler = new ScriptJobHandler(triggerParam.getJobId(), triggerParam.getGlueUpdatetime(), triggerParam.getGlueSource(), GlueTypeEnum.match(triggerParam.getGlueType()));
+            }
+        } else {
+            return new ReturnT<String>(ReturnT.FAIL_CODE, "glueType[" + triggerParam.getGlueType() + "] is not valid.");
+        }
+
+        // executor block strategy
+        if (jobThread != null) {
+            ExecutorBlockStrategyEnum blockStrategy = ExecutorBlockStrategyEnum.match(triggerParam.getExecutorBlockStrategy(), null);
+            if (ExecutorBlockStrategyEnum.DISCARD_LATER == blockStrategy) {
+                // discard when running
+                if (jobThread.isRunningOrHasQueue()) {
+                    return new ReturnT<String>(ReturnT.FAIL_CODE, "block strategy effect："+ExecutorBlockStrategyEnum.DISCARD_LATER.getTitle());
+                }
+            } else if (ExecutorBlockStrategyEnum.COVER_EARLY == blockStrategy) {
+                // kill running jobThread
+                if (jobThread.isRunningOrHasQueue()) {
+                    removeOldReason = "block strategy effect：" + ExecutorBlockStrategyEnum.COVER_EARLY.getTitle();
+
+                    jobThread = null;
+                }
+            } else {
+                // just queue trigger
+            }
+        }
+
+        // replace thread (new or exists invalid)
+        if (jobThread == null) {
+            jobThread = XxlJobExecutor.registJobThread(triggerParam.getJobId(), jobHandler, removeOldReason);
+        }
+
+        // push data to queue
+        ReturnT<String> pushResult = jobThread.pushTriggerQueue(triggerParam);
+        return pushResult;
+    }
+}
+```
 
 ## 4.5 几个表格作用
 
-xxl_job_group：任务分组。一个执行器算作一个组。每组下面会记录对应的实例地址。  
+xxl_job_group：任务分组。一个执行器算作一个组。每组下面会记录对应的实例地址。
 ![任务组](./assets/Java任务调度-1645696899152.png)
-xxl_job_info：具体的任务信息。  
-xxl_job_lock：分布式锁  
-xxl_job_log：日志     
-xxl_job_log_report：调度统计      
-xxl_job_logglue： 可以记录GLUE模式代码历史版本       
-xxl_job_registry：注册信息表，每一台机器注册上来，都会记录一条记录。      
+xxl_job_info：具体的任务信息。
+xxl_job_lock：分布式锁
+xxl_job_log：日志
+xxl_job_log_report：调度统计
+xxl_job_logglue： 可以记录GLUE模式代码历史版本
+xxl_job_registry：注册信息表，每一台机器注册上来，都会记录一条记录。
 ![注册表](./assets/Java任务调度-1645696584108.png)
-xxl_job_user：用户表       
+xxl_job_user：用户表
 
 其中xxl_job_group，xxl_job_info，xxl_job_lock是调度器的关键，其他的是起到支撑辅助作用。
-
-## 4.6 为什么说xxl-job是个全异步化调度器
-
-查看  xxl-job-admin， xxl-job-core。
 
 # 5 Quartz
 
@@ -1790,8 +2310,12 @@ public class QuartzScheduler implements RemotableQuartzScheduler {
 
 其中resources.getJobStore() 为 JobStore 实例。用于存储job和triger提供给 QuartzScheduler 使用。
 
+## JOB Store
+
 ![jobstore实现类](./assets/JAVA任务调度技术-1645529673682.png)
 
+RAMJobStore 内存行存储，单机情况下默认。
+JDBC JobStore 数据库。
 查看 RAMJobStore 。
 
 ```java
@@ -2125,13 +2649,24 @@ public class QuartzSchedulerThread extends Thread {
 } 
 ```
 
+5.2 几个概念
+
+Trigger
+![trigger实现](./assets/Java任务调度-Quartz-1645780446974.png)
+
 # 6 Elastic-Job
 
+待续
+
 # 7 Apache DolphinScheduler
+
+待续
 
 # 总结
 
 ![调度框架对比](./assets/JAVA任务调度技术-1645525979146.png)
+
+[Java中常见的几种任务调度框架对比](https://blog.csdn.net/miaomiao19971215/article/details/105634418?spm=1001.2101.3001.6650.2&utm_medium=distribute.pc_relevant.none-task-blog-2%7Edefault%7EBlogCommendFromBaidu%7ERate-2.pc_relevant_default&depth_1-utm_source=distribute.pc_relevant.none-task-blog-2%7Edefault%7EBlogCommendFromBaidu%7ERate-2.pc_relevant_default&utm_relevant_index=5)
 
 # 引用
 
