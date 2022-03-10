@@ -18,7 +18,7 @@
 | ScheduledExecutorService |        JDK自带        | 基于线程池技术，常用于中间件中  |                           |
 | Spring Task              |    Spring-context    | Spring 项目，常用于单体应用开发 |                           |
 | XXL-JOB                  |    国产开源中间件    | 可用于分布式项目调度            | 依赖mysql                 |
-| Quartz                   | OpenSymphony 开源组织 | 一些中间件常常基于Quartz开发    |                           |
+| Quartz                   | OpenSymphony 开源组织 | 一些中间件常常基于Quartz开发    | 分布式需要依赖数据库      |
 | Elastic-Job              |      当当⽹开源      | 可用于分布式项目调度            | 需要依赖ZooKeeper + Mesos |
 | Apache DolphinScheduler  |       易观开源       | 大数据任务调度                  |                           |
 
@@ -255,7 +255,7 @@ public class Timer {
             }
             queue.add(task);
             if (queue.getMin() == task)
-                //说明加入task之前。队列为空，处于wait状态。需要唤起。
+                //说明加入task之前。队列为空，处于wait状态，需要唤醒。或者还有一种情况，就是加入的task处于头部，需要立即处理。有可能此时线程处于等待状态，需要唤醒。
                 queue.notify();
         }
     }
