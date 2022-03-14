@@ -25,4 +25,9 @@ public class Application {
         System.out.println("执行定时任务，time="+System.currentTimeMillis()/1000%60+"秒");
     }
 
+    @Scheduled(fixedDelayString = "${time:1000}")
+    public void schedled2(){
+        System.out.println("fixedDelayString 执行定时任务，time="+System.currentTimeMillis()/1000%60+"秒");
+    }
+
 }

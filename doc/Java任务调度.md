@@ -461,14 +461,14 @@ JDK在1.5之后J引入了 ThreadPoolExecutor 线程池技术。 线程池技术�
 
 ScheduledThreadPoolExecutor 在实现上与Timer是相似的，都是通过实现一个优先队列来管理任务，同时这个优先队列又是一个阻塞队列，在获取第一个任务后，只有到了执行时间才会返回任务。一个比较大的改进在于，获取任务后不是直接执行代码，而是交给线程池来调度。
 
-## 2.1核心类
+## 2.1核心类和接口
 
 ScheduledExecutorService 的一些核心类如下：
 
 
 | 类                                              | 功能         | 说明                                                     |
 | ------------------------------------------------- | -------------- | ---------------------------------------------------------- |
-| ScheduledExecutorService                        | 抽象类       |                                                          |
+| ScheduledExecutorService                        | 抽象类       | 定义了规范                                               |
 | Executors.DelegatedScheduledExecutorService     | 包装类       | 用于包装 ScheduledThreadPoolExecutor，<br>只暴露关键方法 |
 | ScheduledThreadPoolExecutor                     | 核心执行器   | 实现类，真正执行调度逻辑的地方                           |
 | ScheduledThreadPoolExecutor.DelayedWorkQueue    | 延迟阻塞队列 | 任务周期执行的核心方法在这个类中实现                     |
@@ -492,7 +492,7 @@ public class Application {
 查看 ScheduledExecutorService 的结构，
 ![ScheduledExecutorService类结构](./assets/JAVA任务调度技术-ScheduledExecutorService类结构-1645092759084.png)
 
-提交任务的方法共有4个，与Timer不同的是，可以提交Callable类型的任务。
+提交任务的方法共有4个，与Timer相比做了精简。
 
 ```java
 public interface ScheduledExecutorService extends ExecutorService {
@@ -514,10 +514,25 @@ ScheduledExecutorService只定义了相应的规范，还需要具体类进行�
 通过查看 Executors.newSingleThreadScheduledExecutor()，具体实现如下
 
 ```java
+public class Executors {
     public static ScheduledExecutorService newSingleThreadScheduledExecutor() {
-        return new DelegatedScheduledExecutorService(new ScheduledThreadPoolExecutor(1));
+        return new DelegatedScheduledExecutorService(new ScheduledThreadPoolExecutor(1);
     }
+   public static ScheduledExecutorService newSingleThreadScheduledExecutor(ThreadFactory threadFactory) {
+      return new DelegatedScheduledExecutorService
+              (new ScheduledThreadPoolExecutor(1, threadFactory));
+   }
+   
+   public static ScheduledExecutorService newScheduledThreadPool(int corePoolSize) {
+      return new ScheduledThreadPoolExecutor(corePoolSize);
+   }
 
+   
+   public static ScheduledExecutorService newScheduledThreadPool(
+           int corePoolSize, ThreadFactory threadFactory) {
+      return new ScheduledThreadPoolExecutor(corePoolSize, threadFactory);
+   }
+}
 ```
 
 DelegatedScheduledExecutorService 只是一个包装类，核心逻辑在 ScheduledThreadPoolExecutor。
@@ -527,6 +542,8 @@ DelegatedScheduledExecutorService 只是一个包装类，核心逻辑在 Schedu
 public class ScheduledThreadPoolExecutor
         extends ThreadPoolExecutor
         implements ScheduledExecutorService {
+  
+  
     // 构造函数1
    public ScheduledThreadPoolExecutor(int corePoolSize) {
       super(corePoolSize, Integer.MAX_VALUE, 0, NANOSECONDS, new DelayedWorkQueue());
@@ -572,8 +589,7 @@ public class ScheduledThreadPoolExecutor
 DelayedWorkQueue 类的定义如下。可以看到，DelayedWorkQueue的实现了BlockingQueue接口，可以传入JDK的线程池进行消费。
 
 ```java
-static class DelayedWorkQueue extends AbstractQueue<Runnable>
-        implements BlockingQueue<Runnable> {
+static class DelayedWorkQueue extends AbstractQueue<Runnable> implements BlockingQueue<Runnable> {
 }
 ```
 
@@ -604,9 +620,60 @@ static class DelayedWorkQueue extends AbstractQueue<Runnable> implements Blockin
    private void siftDown(int k, RunnableScheduledFuture<?> key) {
        //省略代码
    }
-   
+   //锁
    private final ReentrantLock lock = new ReentrantLock();
+   // Condition
    private final Condition available = lock.newCondition();
+
+   /**
+    * 当前线程会等待队列头部的任务。 Leader-Follower 模式的这种变体用于最大限度地减少不必要的定时等待。当一个线程成为领导者时，它只等待下一个延迟过去，但其他线程无限期地等待。领导者线程必须在从 take() 或 poll(...) 返回之前向其他线程发出信号，除非其他一些线程在此期间成为领导者。每当队列的头被替换为具有更早到期时间的任务时，leader 字段通过重置为 null 而失效，并且一些等待线程（但不一定是当前的 leader）被发出信号。所以等待线程必须准备好在等待时获取和失去领导权。
+    */
+   private Thread leader = null;
+
+   public void put(Runnable e) {
+      offer(e);
+   }
+
+   public boolean add(Runnable e) {
+      return offer(e);
+   }
+
+   public boolean offer(Runnable e, long timeout, TimeUnit unit) {
+      return offer(e);
+   }
+   //以上几个方法都是指向了offer
+   public boolean offer(Runnable x) {
+      if (x == null)
+         throw new NullPointerException();
+      RunnableScheduledFuture<?> e = (RunnableScheduledFuture<?>)x;
+      final ReentrantLock lock = this.lock;
+      lock.lock();
+      try {
+         int i = size;
+         if (i >= queue.length)
+             //扩容
+            grow();
+         size = i + 1;
+         if (i == 0) {
+             //第一个元素，不需要排序
+            queue[0] = e;
+            setIndex(e, 0);
+         } else {
+             //队列中还有其他元素，需要排序
+            siftUp(i, e);
+         }
+         if (queue[0] == e) {
+             //加入元素。如果排序后，新增的元素属于队首。则触发一次通知，唤起一个线程（有可能是队首正在倒计时的任务，也有可能是非队首线程）。
+            leader = null;
+            //唤起一个线程。
+            available.signal();
+         }
+      } finally {
+         lock.unlock();
+      }
+      return true;
+   }
+   
    
    //查看阻塞队列的take方法
    public RunnableScheduledFuture<?> take() throws InterruptedException {
@@ -617,7 +684,7 @@ static class DelayedWorkQueue extends AbstractQueue<Runnable> implements Blockin
              //1、从队首获取待执行的任务。此任务在队列中最早执行。
             RunnableScheduledFuture<?> first = queue[0];
             if (first == null)
-                // 2 队列中还没有元素，等待。
+                // 2 如果队列为空，所有的线程都在这里等待，此时锁已经被释放，等待offer方法被调用，此时加入的任务在队首，会调用available.signal()唤起一个线程。
                available.await();
             else {
                 //3 delay=下次执行时间-当前时间。当<=0说明需要被执行。
@@ -629,12 +696,15 @@ static class DelayedWorkQueue extends AbstractQueue<Runnable> implements Blockin
    
                first = null; // don't retain ref while waiting  等待时去除引用
                if (leader != null)
+                   // 6 注意这里我编码为了6，因为第一个线程进来，是不会执行到这里。
+                   // 在等待的过程过，如果leader已经有值，说明他是后来者。会进入这里等待，直到leader线程执行完。或者新加了一个元素到队列的头部，才会重新获取锁。
+                   // 这种场景下，会有一个leader线程正在available.awaitNanos(delay)，其他线程是available.await(); 大家一起在等。
                   available.await();
                else {
                   Thread thisThread = Thread.currentThread();
                   leader = thisThread;
                   try {
-                      //5 当前线程等待，直到被唤醒或者等待时长结束
+                      //5 当前线程，是第一个线程进到这个代码，因此被标记为leader。在此过程中，如果有其他线程进来，只能进到第6步等待，
                      available.awaitNanos(delay);
                   } finally {
                      if (leader == thisThread)
@@ -655,8 +725,9 @@ static class DelayedWorkQueue extends AbstractQueue<Runnable> implements Blockin
     * 
     * 使用最后一个元素替换掉当前元素，并且重新向下排序。
     * 注意，这时第一个元素已经从队列中去除，这一点与Timer的实现方式不同。
-    * Timer是修改时间了之后，从上往下重新排序。只需要排序一次。
-    * ScheduledExecutorService执行一个定时任务，需要进行两次排序。第一次是获取了task,第二次是真正执行task的时候。
+    * Timer是不需要将元素取出，而是直接修改时间了之后，从上往下重新排序。只需要排序一次。
+    * 
+    * ScheduledExecutorService执行一个周期性任务，需要进行两次排序。第一次是获取了task，排序，第二次是真正执行task的时候。再放回队列，需要排序
     * 
     * @param f
     * @return
@@ -673,6 +744,10 @@ static class DelayedWorkQueue extends AbstractQueue<Runnable> implements Blockin
    }
 }
 ```
+
+具体流程如下：
+
+![DelayedWorkQueue调度示意图.png](./assets/Java任务调度-1647231179027.png)
 
 ## 2.5 ScheduledFutureTask 类
 
@@ -735,7 +810,7 @@ public class ScheduledThreadPoolExecutor
 
 通过分析源码可以看出，ScheduledExecutorService  是通过实现一个优先队列来存储和调度任务的。从原理上来说是和Timer是类似的。可以认为是Timer 的升级版，新增了线程池执行任务的功能。
 
-![image.png](./assets/1645675721879-image.png)
+![](./assets/Java任务调度-1647223501975.png)
 
 ScheduledExecutorService 和 Timer 比较
 
@@ -767,12 +842,14 @@ Spring Task处于spring-context项目的org.springframework.scheduling包下。�
 
 ```java
 @Configuration
+//启用任务调度配置
 @EnableScheduling
 public class Application {
 
     public static void main(String[] args) {
         AnnotationConfigApplicationContext annotationConfigApplicationContext = new AnnotationConfigApplicationContext(Application.class);
     }
+    //配置注解，将一个方法配置成为任务
     @Scheduled(fixedRate = 1*1000)
     public void schedled(){
         System.out.println("执行定时任务，time="+System.currentTimeMillis()/1000%60+"秒");
@@ -794,16 +871,350 @@ public class Application {
 
 | 类                                   | 功能                 | 说明                                                         |
 | -------------------------------------- | ---------------------- | -------------------------------------------------------------- |
+| TaskScheduler                        | 基础接口             | 定义了Spring Task提交任务的基本规范                          |
+| ConcurrentTaskScheduler              | 调度器-适配器        | 将 ScheduledExecutorService适配成  TaskScheduler             |
 | Scheduled                            | 注解类               | 将一个方法标记为定时执行的task，提供了多种配置触发时间的方式 |
 | ScheduledAnnotationBeanPostProcessor | 后置处理器           | 解析所有被Scheduled标识的方法处理成的task，并做相关配置      |
 | ScheduledTaskRegistrar               | 任务注册中心         | 缓存了task和任务处理器                                       |
-| ConcurrentTaskScheduler              | 默认调度器           | 内置了ScheduledExecutorService                               |
 | ReschedulingRunnable                 | cron表达式Task适配器 | 对于使用了Trigger的Task，将使用ReschedulingRunnable重新封装  |
 | Trigger                              | 触发器               | 对于cron表达式的task，有用到                                 |
 
 以上类都处于org.springframework.scheduling包下。后续将会对这些类进行介绍。
 
-## 3.3 Scheduled 注解
+基本流程
+
+![image.png](./assets/1646990411011-image.png)
+
+## 3.3 TaskScheduler接口 以及 Trigger接口
+
+TaskScheduler 是Spring task中的任务调度接口，定义了一系列提交任务的方法，与 ScheduledExecutorService 角色相当。
+方法概览如下：
+
+```java
+public interface TaskScheduler {
+
+    default Clock getClock() {
+        return Clock.systemDefaultZone();
+    }
+   
+    @Nullable
+    ScheduledFuture<?> schedule(Runnable task, Trigger trigger);
+   
+    ScheduledFuture<?> schedule(Runnable task, Date startTime);
+   
+    ScheduledFuture<?> scheduleAtFixedRate(Runnable task, Date startTime, long period);
+   
+    ScheduledFuture<?> scheduleAtFixedRate(Runnable task, long period);
+   
+    ScheduledFuture<?> scheduleWithFixedDelay(Runnable task, long delay);
+   
+    ScheduledFuture<?> scheduleWithFixedDelay(Runnable task, Date startTime, long delay);
+   
+    //另外提供了一些default方法
+    default ScheduledFuture<?> schedule(Runnable task, Instant startTime) {
+        return schedule(task, Date.from(startTime));
+    }
+   
+    default ScheduledFuture<?> scheduleAtFixedRate(Runnable task, Instant startTime, Duration period) {
+        return scheduleAtFixedRate(task, Date.from(startTime), period.toMillis());
+    }
+   
+    default ScheduledFuture<?> scheduleAtFixedRate(Runnable task, Duration period) {
+        return scheduleAtFixedRate(task, period.toMillis());
+    }
+   
+    default ScheduledFuture<?> scheduleWithFixedDelay(Runnable task, Instant startTime, Duration delay) {
+        return scheduleWithFixedDelay(task, Date.from(startTime), delay.toMillis());
+    }
+   
+   
+    default ScheduledFuture<?> scheduleWithFixedDelay(Runnable task, Duration delay) {
+        return scheduleWithFixedDelay(task, delay.toMillis());
+    }
+
+
+
+}
+```
+
+与ScheduledExecutorService的接口很类似
+
+```java
+public interface ScheduledExecutorService extends ExecutorService {
+   //delay时间后，执行一次任务
+    public ScheduledFuture<?> schedule(Runnable command, long delay, TimeUnit unit);
+    //delay时间后，执行一次任务有返回值的任务
+    public <V> ScheduledFuture<V> schedule(Callable<V> callable, long delay, TimeUnit unit);
+    //以固定频率执行任务
+    public ScheduledFuture<?> scheduleAtFixedRate(Runnable command, long initialDelay, long period, TimeUnit unit);
+    //以固定延迟时间执行任务
+    public ScheduledFuture<?> scheduleWithFixedDelay(Runnable command, long initialDelay, long delay, TimeUnit unit);
+}
+```
+
+但需要注意的是新增了一个方法。
+
+```
+ScheduledFuture<?> schedule(Runnable task, Trigger trigger);
+```
+
+这个方法比较特殊，也是实现cron表达式的关键，依靠 Trigger。Trigger也很好理解，定义了获取下一次执行时间规范，由具体类去实现。
+
+![](./assets/Java任务调度-1647253757369.png)
+
+```java
+public interface Trigger {
+    // 获取下一次执行时间
+	@Nullable
+	Date nextExecutionTime(TriggerContext triggerContext);
+}
+
+public interface TriggerContext {
+   
+   default Clock getClock() {
+      return Clock.systemDefaultZone();
+   }
+
+   //上一次计划执行时间
+   @Nullable
+   Date lastScheduledExecutionTime();
+   // 上一次具体执行时间
+   @Nullable
+   Date lastActualExecutionTime();
+   //完成四件
+   @Nullable
+   Date lastCompletionTime();
+
+}
+```
+
+```java
+
+public class CronTrigger implements Trigger {
+
+	private final CronExpression expression;
+
+	private final ZoneId zoneId;
+
+	public CronTrigger(String expression) {
+		this(expression, ZoneId.systemDefault());
+	}
+
+	public CronTrigger(String expression, TimeZone timeZone) {
+		this(expression, timeZone.toZoneId());
+	}
+
+	public CronTrigger(String expression, ZoneId zoneId) {
+		Assert.hasLength(expression, "Expression must not be empty");
+		Assert.notNull(zoneId, "ZoneId must not be null");
+
+		this.expression = CronExpression.parse(expression);
+		this.zoneId = zoneId;
+	}
+
+	@Override
+	public Date nextExecutionTime(TriggerContext triggerContext) {
+		Date date = triggerContext.lastCompletionTime();
+		if (date != null) {
+			Date scheduled = triggerContext.lastScheduledExecutionTime();
+			if (scheduled != null && date.before(scheduled)) {
+				// Previous task apparently executed too early...
+				// Let's simply use the last calculated execution time then,
+				// in order to prevent accidental re-fires in the same second.
+				date = scheduled;
+			}
+		}
+		else {
+			date = new Date(triggerContext.getClock().millis());
+		}
+		ZonedDateTime dateTime = ZonedDateTime.ofInstant(date.toInstant(), this.zoneId);
+		ZonedDateTime next = this.expression.next(dateTime);
+		return (next != null ? Date.from(next.toInstant()) : null);
+	}
+}
+
+```
+
+回头看下TaskScheduler，spring提供了三个实现类。
+
+![TaskScheduler](./assets/JAVA任务调度技术-1645515811598.png)
+
+实现类 ConcurrentTaskScheduler 注解上讲的很明白，就是一个将java.util.concurrent.ScheduledExecutorService 适配成 TaskScheduler 的适配器。
+其构造器如下
+![ConcurrentTaskScheduler构造器](./assets/JAVA任务调度技术-1645516846964.png)
+
+ThreadPoolTaskScheduler 则是封装了ScheduledThreadPoolExecutor。
+![1](./assets/JAVA任务调度技术-1645517482388.png)
+
+因此很明显，默认情况下，Spring-task的底层就是由ScheduledExecutorService来提供实际调度的。当然也可以自己实现一个TaskScheduler的实现类，但目前看来并没有理由再造一个这样的轮子。置于为什么没有直接使用ScheduledExecutorService，一是提供了一个新的方法提交Trigger。二是方便拓展，可以自己实现一个任务调度器。
+
+```java
+public class ConcurrentTaskScheduler extends ConcurrentTaskExecutor implements TaskScheduler {
+
+	@Nullable
+	private static Class<?> managedScheduledExecutorServiceClass;
+
+	static {
+		try {
+               // 需要单独引入 javax.enterprise.concurrent-api 包。默认是没有的。ManagedScheduledExecutorService
+			managedScheduledExecutorServiceClass = ClassUtils.forName(
+					"javax.enterprise.concurrent.ManagedScheduledExecutorService",
+					ConcurrentTaskScheduler.class.getClassLoader());
+		}
+		catch (ClassNotFoundException ex) {
+			// JSR-236 API not available...
+			managedScheduledExecutorServiceClass = null;
+		}
+	}
+
+
+	private ScheduledExecutorService scheduledExecutor;
+
+	private boolean enterpriseConcurrentScheduler = false;
+
+	@Nullable
+	private ErrorHandler errorHandler;
+
+	private Clock clock = Clock.systemDefaultZone();
+
+
+
+	public ConcurrentTaskScheduler() {
+		super();
+		this.scheduledExecutor = initScheduledExecutor(null);
+	}
+
+	public ConcurrentTaskScheduler(ScheduledExecutorService scheduledExecutor) {
+		super(scheduledExecutor);
+		this.scheduledExecutor = initScheduledExecutor(scheduledExecutor);
+	}
+
+	public ConcurrentTaskScheduler(Executor concurrentExecutor, ScheduledExecutorService scheduledExecutor) {
+		super(concurrentExecutor);
+		this.scheduledExecutor = initScheduledExecutor(scheduledExecutor);
+	}
+
+
+	private ScheduledExecutorService initScheduledExecutor(@Nullable ScheduledExecutorService scheduledExecutor) {
+		if (scheduledExecutor != null) {
+			this.scheduledExecutor = scheduledExecutor;
+            // 当前实现类为 ManagedScheduledExecutorService的子类
+			this.enterpriseConcurrentScheduler = (managedScheduledExecutorServiceClass != null &&
+					managedScheduledExecutorServiceClass.isInstance(scheduledExecutor));
+		} else {
+			this.scheduledExecutor = Executors.newSingleThreadScheduledExecutor();
+			this.enterpriseConcurrentScheduler = false;
+		}
+		return this.scheduledExecutor;
+	}
+
+
+	@Override
+	@Nullable
+	public ScheduledFuture<?> schedule(Runnable task, Trigger trigger) {
+		try {
+			if (this.enterpriseConcurrentScheduler) {
+				return new EnterpriseConcurrentTriggerScheduler().schedule(decorateTask(task, true), trigger);
+			} else {
+                //默认为走到这里
+				ErrorHandler errorHandler = (this.errorHandler != null ? this.errorHandler : TaskUtils.getDefaultErrorHandler(true));
+				return new ReschedulingRunnable(task, trigger, this.clock, this.scheduledExecutor, errorHandler).schedule();
+			}
+		} catch (RejectedExecutionException ex) {
+			throw new TaskRejectedException("Executor [" + this.scheduledExecutor + "] did not accept task: " + task, ex);
+		}
+	}
+
+	@Override
+	public ScheduledFuture<?> schedule(Runnable task, Date startTime) {
+		long initialDelay = startTime.getTime() - this.clock.millis();
+		try {
+			return this.scheduledExecutor.schedule(decorateTask(task, false), initialDelay, TimeUnit.MILLISECONDS);
+		}
+		catch (RejectedExecutionException ex) {
+			throw new TaskRejectedException("Executor [" + this.scheduledExecutor + "] did not accept task: " + task, ex);
+		}
+	}
+
+	@Override
+	public ScheduledFuture<?> scheduleAtFixedRate(Runnable task, Date startTime, long period) {
+		long initialDelay = startTime.getTime() - this.clock.millis();
+		try {
+			return this.scheduledExecutor.scheduleAtFixedRate(decorateTask(task, true), initialDelay, period, TimeUnit.MILLISECONDS);
+		}
+		catch (RejectedExecutionException ex) {
+			throw new TaskRejectedException("Executor [" + this.scheduledExecutor + "] did not accept task: " + task, ex);
+		}
+	}
+
+	@Override
+	public ScheduledFuture<?> scheduleAtFixedRate(Runnable task, long period) {
+		try {
+			return this.scheduledExecutor.scheduleAtFixedRate(decorateTask(task, true), 0, period, TimeUnit.MILLISECONDS);
+		}
+		catch (RejectedExecutionException ex) {
+			throw new TaskRejectedException("Executor [" + this.scheduledExecutor + "] did not accept task: " + task, ex);
+		}
+	}
+
+	@Override
+	public ScheduledFuture<?> scheduleWithFixedDelay(Runnable task, Date startTime, long delay) {
+		long initialDelay = startTime.getTime() - this.clock.millis();
+		try {
+			return this.scheduledExecutor.scheduleWithFixedDelay(decorateTask(task, true), initialDelay, delay, TimeUnit.MILLISECONDS);
+		}
+		catch (RejectedExecutionException ex) {
+			throw new TaskRejectedException("Executor [" + this.scheduledExecutor + "] did not accept task: " + task, ex);
+		}
+	}
+
+	@Override
+	public ScheduledFuture<?> scheduleWithFixedDelay(Runnable task, long delay) {
+		try {
+			return this.scheduledExecutor.scheduleWithFixedDelay(decorateTask(task, true), 0, delay, TimeUnit.MILLISECONDS);
+		}
+		catch (RejectedExecutionException ex) {
+			throw new TaskRejectedException("Executor [" + this.scheduledExecutor + "] did not accept task: " + task, ex);
+		}
+	}
+
+	private Runnable decorateTask(Runnable task, boolean isRepeatingTask) {
+		Runnable result = TaskUtils.decorateTaskWithErrorHandler(task, this.errorHandler, isRepeatingTask);
+		if (this.enterpriseConcurrentScheduler) {
+			result = ManagedTaskBuilder.buildManagedTask(result, task.toString());
+		}
+		return result;
+	}
+
+
+	/**
+	 * Delegate that adapts a Spring Trigger to a JSR-236 Trigger.
+	 * Separated into an inner class in order to avoid a hard dependency on the JSR-236 API.
+	 */
+	private class EnterpriseConcurrentTriggerScheduler {
+
+		public ScheduledFuture<?> schedule(Runnable task, final Trigger trigger) {
+			ManagedScheduledExecutorService executor = (ManagedScheduledExecutorService) scheduledExecutor;
+			return executor.schedule(task, new javax.enterprise.concurrent.Trigger() {
+				@Override
+				@Nullable
+				public Date getNextRunTime(@Nullable LastExecution le, Date taskScheduledTime) {
+					return (trigger.nextExecutionTime(le != null ?
+							new SimpleTriggerContext(le.getScheduledStart(), le.getRunStart(), le.getRunEnd()) :
+							new SimpleTriggerContext()));
+				}
+				@Override
+				public boolean skipRun(LastExecution lastExecution, Date scheduledRunTime) {
+					return false;
+				}
+			});
+		}
+	}
+
+}
+```
+
+## 3.4 Scheduled 注解
 
 首先看一下Scheduled的代码，看提供了哪些功能呢。
 
@@ -820,13 +1231,17 @@ public @interface Scheduled {
 	long initialDelay() default -1;
     //时间单位，默认是毫秒
     TimeUnit timeUnit() default TimeUnit.MILLISECONDS;
-    //忽略其他
+    //一下是String类型的配，方便接收配置化的数据，如${fixedDelay:10}
+    String fixedDelayString() default "";
+    String fixedRateString() default "";
+    String initialDelayString() default "";
+
 }
 ```
 
 Scheduled 中包含了任务调度的相关配置参数。 相比较ScheduledExecutorService，多了cron表达式。在任务的控制上更加灵活，不再局限于固定重复周期。
 
-## 3.4 ScheduledAnnotationBeanPostProcessor 类
+## 3.5 ScheduledAnnotationBeanPostProcessor 类
 
 spring-task需要@EnableScheduling开启注解，查看其定义：
 
@@ -872,8 +1287,17 @@ public class ScheduledAnnotationBeanPostProcessor
 
    @Override
    public Object postProcessAfterInitialization(Object bean, String beanName) {
-       // 忽略。。
-       processScheduled(scheduled, method, bean);
+       // 忽略...
+      // 查找Scheduled注解的Method
+      Map<Method, Set<Scheduled>> annotatedMethods = MethodIntrospector.selectMethods(targetClass,
+              (MethodIntrospector.MetadataLookup<Set<Scheduled>>) method -> {
+                 Set<Scheduled> scheduledAnnotations = AnnotatedElementUtils.getMergedRepeatableAnnotations(
+                         method, Scheduled.class, Schedules.class);
+                 return (!scheduledAnnotations.isEmpty() ? scheduledAnnotations : null);
+              });
+  
+      annotatedMethods.forEach((method, scheduledAnnotations) ->
+              scheduledAnnotations.forEach(scheduled -> processScheduled(scheduled, method, bean)));
        //忽略。。
    }
   
@@ -882,16 +1306,107 @@ public class ScheduledAnnotationBeanPostProcessor
       try {
           //将Spring bean 封装成为一个Runnable 。在执行Runnable方法时，使用反射技术 method.invoke(this.target)，执行原本逻辑即可。
          Runnable runnable = createRunnable(bean, method);
-         // 获取配置
+   
+         // 处理延迟时间
+         long initialDelay = convertToMillis(scheduled.initialDelay(), scheduled.timeUnit());
+         String initialDelayString = scheduled.initialDelayString();
+         if (StringUtils.hasText(initialDelayString)) {
+            Assert.isTrue(initialDelay < 0, "Specify 'initialDelay' or 'initialDelayString', not both");
+            if (this.embeddedValueResolver != null) {
+               initialDelayString = this.embeddedValueResolver.resolveStringValue(initialDelayString);
+            }
+            if (StringUtils.hasLength(initialDelayString)) {
+               try {
+                  initialDelay = convertToMillis(initialDelayString, scheduled.timeUnit());
+               }
+               catch (RuntimeException ex) {
+                  throw new IllegalArgumentException(
+                          "Invalid initialDelayString value \"" + initialDelayString + "\" - cannot parse into long");
+               }
+            }
+         }
+   
+         // 1、处理cron表达式
          String cron = scheduled.cron();
-         //解析cron
-         cron = this.embeddedValueResolver.resolveStringValue(cron);
-         //这里只摘录了cron方式配置，其他的如fixedDelay配置，fixedRate 配置同理
          if (StringUtils.hasText(cron)) {
+             //处理一下时区的问题
             String zone = scheduled.zone();
+            if (this.embeddedValueResolver != null) {
+               cron = this.embeddedValueResolver.resolveStringValue(cron);
+               zone = this.embeddedValueResolver.resolveStringValue(zone);
+            }
             if (StringUtils.hasLength(cron)) {
-                //注意这里 registrar 中缓存了 CronTask
+               Assert.isTrue(initialDelay == -1, "'initialDelay' not supported for cron triggers");
+               processedSchedule = true;
+               if (!Scheduled.CRON_DISABLED.equals(cron)) {
+                  TimeZone timeZone;
+                  if (StringUtils.hasText(zone)) {
+                     timeZone = StringUtils.parseTimeZoneString(zone);
+                  }
+                  else {
+                     timeZone = TimeZone.getDefault();
+                  }
                   tasks.add(this.registrar.scheduleCronTask(new CronTask(runnable, new CronTrigger(cron, timeZone))));
+               }
+            }
+         }
+   
+         // At this point we don't need to differentiate between initial delay set or not anymore
+         if (initialDelay < 0) {
+            initialDelay = 0;
+         }
+         // 2、处理
+         // Check fixed delay
+         long fixedDelay = convertToMillis(scheduled.fixedDelay(), scheduled.timeUnit());
+         if (fixedDelay >= 0) {
+            Assert.isTrue(!processedSchedule, errorMessage);
+            processedSchedule = true;
+            tasks.add(this.registrar.scheduleFixedDelayTask(new FixedDelayTask(runnable, fixedDelay, initialDelay)));
+         }
+         // 3、处理字符串形式的Scheduled ,比如配置化${time:1000}
+         String fixedDelayString = scheduled.fixedDelayString();
+         /延迟
+         if (StringUtils.hasText(fixedDelayString)) {
+            if (this.embeddedValueResolver != null) {
+               fixedDelayString = this.embeddedValueResolver.resolveStringValue(fixedDelayString);
+            }
+            if (StringUtils.hasLength(fixedDelayString)) {
+               Assert.isTrue(!processedSchedule, errorMessage);
+               processedSchedule = true;
+               try {
+                  fixedDelay = convertToMillis(fixedDelayString, scheduled.timeUnit());
+               }
+               catch (RuntimeException ex) {
+                  throw new IllegalArgumentException(
+                          "Invalid fixedDelayString value \"" + fixedDelayString + "\" - cannot parse into long");
+               }
+               tasks.add(this.registrar.scheduleFixedDelayTask(new FixedDelayTask(runnable, fixedDelay, initialDelay)));
+            }
+         }
+
+         // 3 固定频率的任务
+         long fixedRate = convertToMillis(scheduled.fixedRate(), scheduled.timeUnit());
+         if (fixedRate >= 0) {
+            Assert.isTrue(!processedSchedule, errorMessage);
+            processedSchedule = true;
+            tasks.add(this.registrar.scheduleFixedRateTask(new FixedRateTask(runnable, fixedRate, initialDelay)));
+         }
+         String fixedRateString = scheduled.fixedRateString();
+         if (StringUtils.hasText(fixedRateString)) {
+            if (this.embeddedValueResolver != null) {
+               fixedRateString = this.embeddedValueResolver.resolveStringValue(fixedRateString);
+            }
+            if (StringUtils.hasLength(fixedRateString)) {
+               Assert.isTrue(!processedSchedule, errorMessage);
+               processedSchedule = true;
+               try {
+                  fixedRate = convertToMillis(fixedRateString, scheduled.timeUnit());
+               }
+               catch (RuntimeException ex) {
+                  throw new IllegalArgumentException(
+                          "Invalid fixedRateString value \"" + fixedRateString + "\" - cannot parse into long");
+               }
+               tasks.add(this.registrar.scheduleFixedRateTask(new FixedRateTask(runnable, fixedRate, initialDelay)));
             }
          }
          //忽略其他情况
@@ -900,7 +1415,12 @@ public class ScheduledAnnotationBeanPostProcessor
   
    }
 
-   //监听容器刷新时间
+   protected Runnable createRunnable(Object target, Method method) {
+      Method invocableMethod = AopUtils.selectInvocableMethod(method, target.getClass());
+      return new ScheduledMethodRunnable(target, invocableMethod);
+   }
+
+   //监听容器刷新事件
    public void onApplicationEvent(ContextRefreshedEvent event) {
       if (event.getApplicationContext() == this.applicationContext) {
          finishRegistration();
@@ -913,7 +1433,7 @@ public class ScheduledAnnotationBeanPostProcessor
       if (this.scheduler != null) {
          this.registrar.setScheduler(this.scheduler);
       }
-   
+       //检查是否做了配置SchedulingConfigurer
        if (this.beanFactory instanceof ListableBeanFactory) {
          Map<String, SchedulingConfigurer> beans =
                  ((ListableBeanFactory) this.beanFactory).getBeansOfType(SchedulingConfigurer.class);
@@ -924,7 +1444,10 @@ public class ScheduledAnnotationBeanPostProcessor
          }
       }
 
-   
+      /**
+       * 获取调度器的核心代码
+       */
+
       if (this.registrar.hasTasks() && this.registrar.getScheduler() == null) {
          try {
              //1、根据类型获取TaskScheduler实现类
@@ -978,7 +1501,7 @@ public class ScheduledAnnotationBeanPostProcessor
 
 其中1-4在 ScheduledAnnotationBeanPostProcessor 中实现， 5在ScheduledTaskRegistrar中实现。
 
-## 3.5 ScheduledTaskRegistrar 类
+## 3.6 ScheduledTaskRegistrar 类
 
 ScheduledTaskRegistrar是一个核心类，也是一个容器类，保存了所有的task的定义。同时也是真正将Task提交给调度器的地方。具体看以下代码。
 
@@ -1020,7 +1543,12 @@ public class ScheduledTaskRegistrar implements ScheduledTaskHolder, Initializing
          //需要将ScheduledExecutorService 封装成为 TaskScheduler 才能够使用
          this.taskScheduler = new ConcurrentTaskScheduler(this.localExecutor);
       }
-  
+
+      if (this.triggerTasks != null) {
+         for (TriggerTask task : this.triggerTasks) {
+            addScheduledTask(scheduleTriggerTask(task));
+         }
+      }
       if (this.cronTasks != null) {
          for (CronTask task : this.cronTasks) {
             addScheduledTask(scheduleCronTask(task));
@@ -1031,9 +1559,12 @@ public class ScheduledTaskRegistrar implements ScheduledTaskHolder, Initializing
             addScheduledTask(scheduleFixedRateTask(task));
          }
       }
-      //省略部分代码
+      if (this.fixedDelayTasks != null) {
+         for (IntervalTask task : this.fixedDelayTasks) {
+            addScheduledTask(scheduleFixedDelayTask(task));
+         }
+      }
    }
-
    public ScheduledTask scheduleTriggerTask(TriggerTask task) {
       ScheduledTask scheduledTask = this.unresolvedTasks.remove(task);
       boolean newTask = false;
@@ -1042,7 +1573,6 @@ public class ScheduledTaskRegistrar implements ScheduledTaskHolder, Initializing
          newTask = true;
       }
       if (this.taskScheduler != null) {
-          //执行任务
          scheduledTask.future = this.taskScheduler.schedule(task.getRunnable(), task.getTrigger());
       }
       else {
@@ -1051,46 +1581,144 @@ public class ScheduledTaskRegistrar implements ScheduledTaskHolder, Initializing
       }
       return (newTask ? scheduledTask : null);
    }
+
+   /**
+    * Schedule the specified cron task, either right away if possible
+    * or on initialization of the scheduler.
+    * @return a handle to the scheduled task, allowing to cancel it
+    * (or {@code null} if processing a previously registered task)
+    * @since 4.3
+    */
+   @Nullable
+   public ScheduledTask scheduleCronTask(CronTask task) {
+      ScheduledTask scheduledTask = this.unresolvedTasks.remove(task);
+      boolean newTask = false;
+      if (scheduledTask == null) {
+         scheduledTask = new ScheduledTask(task);
+         newTask = true;
+      }
+      if (this.taskScheduler != null) {
+         scheduledTask.future = this.taskScheduler.schedule(task.getRunnable(), task.getTrigger());
+      }
+      else {
+         addCronTask(task);
+         this.unresolvedTasks.put(task, scheduledTask);
+      }
+      return (newTask ? scheduledTask : null);
+   }
+
+   /**
+    * Schedule the specified fixed-rate task, either right away if possible
+    * or on initialization of the scheduler.
+    * @return a handle to the scheduled task, allowing to cancel it
+    * (or {@code null} if processing a previously registered task)
+    * @since 4.3
+    * @deprecated as of 5.0.2, in favor of {@link #scheduleFixedRateTask(FixedRateTask)}
+    */
+   @Deprecated
+   @Nullable
+   public ScheduledTask scheduleFixedRateTask(IntervalTask task) {
+      FixedRateTask taskToUse = (task instanceof FixedRateTask ? (FixedRateTask) task :
+              new FixedRateTask(task.getRunnable(), task.getInterval(), task.getInitialDelay()));
+      return scheduleFixedRateTask(taskToUse);
+   }
+
+   /**
+    * Schedule the specified fixed-rate task, either right away if possible
+    * or on initialization of the scheduler.
+    * @return a handle to the scheduled task, allowing to cancel it
+    * (or {@code null} if processing a previously registered task)
+    * @since 5.0.2
+    */
+   @Nullable
+   public ScheduledTask scheduleFixedRateTask(FixedRateTask task) {
+      ScheduledTask scheduledTask = this.unresolvedTasks.remove(task);
+      boolean newTask = false;
+      if (scheduledTask == null) {
+         scheduledTask = new ScheduledTask(task);
+         newTask = true;
+      }
+      if (this.taskScheduler != null) {
+         if (task.getInitialDelay() > 0) {
+            Date startTime = new Date(this.taskScheduler.getClock().millis() + task.getInitialDelay());
+            scheduledTask.future =
+                    this.taskScheduler.scheduleAtFixedRate(task.getRunnable(), startTime, task.getInterval());
+         }
+         else {
+            scheduledTask.future =
+                    this.taskScheduler.scheduleAtFixedRate(task.getRunnable(), task.getInterval());
+         }
+      }
+      else {
+         addFixedRateTask(task);
+         this.unresolvedTasks.put(task, scheduledTask);
+      }
+      return (newTask ? scheduledTask : null);
+   }
+
+   /**
+    * Schedule the specified fixed-delay task, either right away if possible
+    * or on initialization of the scheduler.
+    * @return a handle to the scheduled task, allowing to cancel it
+    * (or {@code null} if processing a previously registered task)
+    * @since 4.3
+    * @deprecated as of 5.0.2, in favor of {@link #scheduleFixedDelayTask(FixedDelayTask)}
+    */
+   @Deprecated
+   @Nullable
+   public ScheduledTask scheduleFixedDelayTask(IntervalTask task) {
+      FixedDelayTask taskToUse = (task instanceof FixedDelayTask ? (FixedDelayTask) task :
+              new FixedDelayTask(task.getRunnable(), task.getInterval(), task.getInitialDelay()));
+      return scheduleFixedDelayTask(taskToUse);
+   }
+
+   /**
+    * Schedule the specified fixed-delay task, either right away if possible
+    * or on initialization of the scheduler.
+    * @return a handle to the scheduled task, allowing to cancel it
+    * (or {@code null} if processing a previously registered task)
+    * @since 5.0.2
+    */
+   @Nullable
+   public ScheduledTask scheduleFixedDelayTask(FixedDelayTask task) {
+      ScheduledTask scheduledTask = this.unresolvedTasks.remove(task);
+      boolean newTask = false;
+      if (scheduledTask == null) {
+         scheduledTask = new ScheduledTask(task);
+         newTask = true;
+      }
+      if (this.taskScheduler != null) {
+         if (task.getInitialDelay() > 0) {
+            Date startTime = new Date(this.taskScheduler.getClock().millis() + task.getInitialDelay());
+            scheduledTask.future =
+                    this.taskScheduler.scheduleWithFixedDelay(task.getRunnable(), startTime, task.getInterval());
+         }
+         else {
+            scheduledTask.future =
+                    this.taskScheduler.scheduleWithFixedDelay(task.getRunnable(), task.getInterval());
+         }
+      }
+      else {
+         addFixedDelayTask(task);
+         this.unresolvedTasks.put(task, scheduledTask);
+      }
+      return (newTask ? scheduledTask : null);
+   }
+
 }
 ```
 
-## 3.6 TaskScheduler 以及实现类
-
-TaskScheduler 定义了一系列提交任务的方法，与 ScheduledExecutorService 角色相当。
-
-![TaskScheduler方法](./assets/JAVA任务调度技术-1645516233625.png)
-
-但需要注意的是新增了一个方法。
-
-```
-ScheduledFuture<?> schedule(Runnable task, Trigger trigger);
-```
-
-这个方法比较特殊，也是实现cron表达式的关键。
-
-spring提供了三个实现类。
-
-![TaskScheduler](./assets/JAVA任务调度技术-1645515811598.png)
-
-实现类 ConcurrentTaskScheduler 注解上讲的很明白，就是一个将java.util.concurrent.ScheduledExecutorService 适配成 TaskScheduler 的适配器。
-其构造器如下
-![ConcurrentTaskScheduler构造器](./assets/JAVA任务调度技术-1645516846964.png)
-
-ThreadPoolTaskScheduler 则是封装了ScheduledThreadPoolExecutor。
-![1](./assets/JAVA任务调度技术-1645517482388.png)
-
-因此很明显，Spring-task的底层就是由ScheduledExecutorService来提供实际调度的。当然也可以自己实现一个TaskScheduler的实现类，但目前看来并没有理由再造一个这样的轮子。
-
 ## 3.7 如何执行cron表达式的任务
 
-从前面的代码中我们知道， Spring-task默认使用  ScheduledExecutorService 作为底层逻辑，但是ScheduledExecutorService并不支持cron表达式。不过可以通过将cron表达式的任务分装成ScheduledExecutorService支持的参数即可。也就是
+从前面的代码中我们知道， Spring-task默认使用  ScheduledExecutorService 作为底层逻辑，但是ScheduledExecutorService并不支持cron表达式。不过可以通过将cron表达式的任务封装成ScheduledExecutorService支持的参数即可。基本思想是将任务当成一次延时任务即可，等执行完上一次任务之后，如果还有下次，则重新提交到调度器。也就是：
 
-> 1、将task封装成为CronTask， 先计算cron的下次执行时间与当前的时间差delay。
-> 2、调用 ScheduledExecutorService 实例提交任务。让任务延迟delay执行一次，注意只执行一次。
-> 3、执行业务 run 方法。
-> 4、重复执行1-3即可。
+> 1、将task在封装一层成为CronTask，
+> 2、计算cron的下次执行时间与当前的时间差delay。
+> 3、调用提交任务。让任务延迟delay执行一次，注意只执行一次。
+> 4、执行业务 run 方法。
+> 5、重复执行2-4即可。
 
-这个思路与ScheduledExecutorService获取task后再提交到队列中的思路是一样的。因此不再详细表述， 具体代码参考 ReschedulingRunnable 类和 CronTask 类。
+这个思路与ScheduledExecutorService获取task后再提交到队列中的思路是一样的。具体代码参考 ReschedulingRunnable 类和 CronTask 类。
 
 ```java
 class ReschedulingRunnable extends DelegatingErrorHandlingRunnable implements ScheduledFuture<Object> {
@@ -1155,9 +1783,7 @@ class ReschedulingRunnable extends DelegatingErrorHandlingRunnable implements Sc
 }
 ```
 
-## 3.8 总结
-
-spring task中任务处理器为TaskScheduler实现类，任务为Trigger的实现类。基本的思想还是与 ScheduledExecutorService 想类似的。在默认情况下也是使用ScheduledExecutorService作为任务的处理器。
+## 3.8 Spring task使用注意事项
 
 使用spring task需要注意的是，如果我们没有配置TaskScheduler实例，默认情况下使用 Executors.newSingleThreadScheduledExecutor()新建了一个实例，这个实例只有一个线程处理任务，在任务耗时比较高的情况下会有可能发生阻塞。最好是配置一个ScheduledExecutorService实例交给Spring管理
 
@@ -1192,6 +1818,10 @@ public class Application2 {
 }
 
 ```
+
+## 3.9 总结
+
+spring task中任务处理器为TaskScheduler实现类，任务为Trigger的实现类。基本的思想还是与 ScheduledExecutorService 想类似的。在默认情况下也是使用ScheduledExecutorService作为任务的处理器。
 
 # 4 XXL-JOB
 
