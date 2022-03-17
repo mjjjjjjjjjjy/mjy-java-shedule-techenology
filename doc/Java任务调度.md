@@ -747,7 +747,8 @@ static class DelayedWorkQueue extends AbstractQueue<Runnable> implements Blockin
 
 具体流程如下：
 
-![DelayedWorkQueue调度示意图.png](./assets/Java任务调度-1647231179027.png)
+![](./assets/Java任务调度-1647479674641.png)
+
 
 ## 2.5 ScheduledFutureTask 类
 
@@ -824,7 +825,7 @@ ScheduledExecutorService 和 Timer 比较
 
 # 3 Spring Task
 
-Spring Task处于spring-context项目的org.springframework.scheduling包下。可以通过注解的方式，将Spring bean中的某个方法变成一个task，非常方便。而且引入了cron表达式，使用更加灵活。
+Spring Task处于spring-context项目的org.springframework.scheduling包下，因此只要是Spring项目，都可以通过注解的方式，将Spring bean中的某个方法变成一个task进行调度，非常方便。而且引入了cron表达式，使用更加灵活。
 
 ## 3.1 Spring Task 简单用法
 
@@ -871,21 +872,214 @@ public class Application {
 
 | 类                                   | 功能                 | 说明                                                         |
 | -------------------------------------- | ---------------------- | -------------------------------------------------------------- |
+| Trigger                              | 触发器接口           | 提供了nextExecutionTime方法，由具体实现类去实现              |
+| Task                                 | Task的公共父类       | 只封装了Runnable一个属性，有一系列的子类拓展成为不同的功能   |
 | TaskScheduler                        | 基础接口             | 定义了Spring Task提交任务的基本规范                          |
-| ConcurrentTaskScheduler              | 调度器-适配器        | 将 ScheduledExecutorService适配成  TaskScheduler             |
+| ConcurrentTaskScheduler              | 调度器-适配器        | 将 ScheduledExecutorService 适配成  TaskScheduler            |
 | Scheduled                            | 注解类               | 将一个方法标记为定时执行的task，提供了多种配置触发时间的方式 |
 | ScheduledAnnotationBeanPostProcessor | 后置处理器           | 解析所有被Scheduled标识的方法处理成的task，并做相关配置      |
 | ScheduledTaskRegistrar               | 任务注册中心         | 缓存了task和任务处理器                                       |
 | ReschedulingRunnable                 | cron表达式Task适配器 | 对于使用了Trigger的Task，将使用ReschedulingRunnable重新封装  |
-| Trigger                              | 触发器               | 对于cron表达式的task，有用到                                 |
 
-以上类都处于org.springframework.scheduling包下。后续将会对这些类进行介绍。
+初始化基本流程
 
-基本流程
+![](./assets/Java任务调度-1647424529343.png)
 
-![image.png](./assets/1646990411011-image.png)
+需要注意的是，Spring Task本质上只定义了提交task的抽象类，并没有提供具体的调度的实现。
 
-## 3.3 TaskScheduler接口 以及 Trigger接口
+为了实现开箱可用，Spring task将ScheduledExecutorService适配成了默认的实现，但是可以根据具体的需要，替换成其他实现。
+
+## 3.3 Trigger接口及实现类
+
+Trigger排在最前面介绍，是因为Timer和ScheduledExcecutorService是没有Trigger的概念的，都是再在各自的Task类中拥有一个下次执行时间的属性。Timer的TimerTask是private long nextExecutionTime。ScheduledFutureTask的是private long time。为了让任务的触发时间更加灵活，引入了Trigger的概念。
+
+Trigger的本意为触发器，枪的扳机。因此相对的，当一个任务被触发时，常常用fire这个词。
+
+Trigger的本质是封装了获取下一次执行时间的逻辑。
+
+```java
+public interface Trigger {
+    // 获取下一次执行时间
+	@Nullable
+	Date nextExecutionTime(TriggerContext triggerContext);
+}
+
+//上下文，用于存储一些时间变量
+public interface TriggerContext {
+   
+   default Clock getClock() {
+      return Clock.systemDefaultZone();
+   }
+
+   //上一次计划执行时间
+   @Nullable
+   Date lastScheduledExecutionTime();
+   // 上一次具体执行时间
+   @Nullable
+   Date lastActualExecutionTime();
+   //完成时间
+   @Nullable
+   Date lastCompletionTime();
+
+}
+//TriggerContext实现类很简单
+public class SimpleTriggerContext implements TriggerContext {
+    private final Clock clock;
+    @Nullable
+    private volatile Date lastScheduledExecutionTime;
+
+    @Nullable
+    private volatile Date lastActualExecutionTime;
+
+    @Nullable
+    private volatile Date lastCompletionTime;
+}
+```
+
+spring task中提供了两个Trigger实现
+
+![](./assets/Java任务调度-1647253757369.png)
+
+周期性触发器-目前没有看到使用的地方
+
+```java
+public class PeriodicTrigger implements Trigger {
+
+    private final long period;
+
+    private final TimeUnit timeUnit;
+
+    private volatile long initialDelay;
+
+    private volatile boolean fixedRate;
+
+    @Override
+    public Date nextExecutionTime(TriggerContext triggerContext) {
+        Date lastExecution = triggerContext.lastScheduledExecutionTime();
+        Date lastCompletion = triggerContext.lastCompletionTime();
+        if (lastExecution == null || lastCompletion == null) {
+            return new Date(triggerContext.getClock().millis() + this.initialDelay);
+        }
+        if (this.fixedRate) {
+            return new Date(lastExecution.getTime() + this.period);
+        }
+        return new Date(lastCompletion.getTime() + this.period);
+    }
+
+}
+```
+
+CronTrigger-支持cron表达式
+
+```java
+
+public class CronTrigger implements Trigger {
+
+	private final CronExpression expression;
+
+	private final ZoneId zoneId;
+
+    //提供了多个构造函数 完成 expression 和 zoneId的复制
+	public CronTrigger(String expression) {
+		this(expression, ZoneId.systemDefault());
+	}
+
+	public CronTrigger(String expression, TimeZone timeZone) {
+		this(expression, timeZone.toZoneId());
+	}
+
+	public CronTrigger(String expression, ZoneId zoneId) {
+		Assert.hasLength(expression, "Expression must not be empty");
+		Assert.notNull(zoneId, "ZoneId must not be null");
+
+		this.expression = CronExpression.parse(expression);
+		this.zoneId = zoneId;
+	}
+
+	@Override
+	public Date nextExecutionTime(TriggerContext triggerContext) {
+		Date date = triggerContext.lastCompletionTime();
+		if (date != null) {
+			Date scheduled = triggerContext.lastScheduledExecutionTime();
+			if (scheduled != null && date.before(scheduled)) {
+				// Previous task apparently executed too early...
+				// Let's simply use the last calculated execution time then,
+				// in order to prevent accidental re-fires in the same second.
+				date = scheduled;
+			}
+		}
+		else {
+			date = new Date(triggerContext.getClock().millis());
+		}
+		ZonedDateTime dateTime = ZonedDateTime.ofInstant(date.toInstant(), this.zoneId);
+		ZonedDateTime next = this.expression.next(dateTime);
+		return (next != null ? Date.from(next.toInstant()) : null);
+	}
+}
+
+```
+
+目前，在Spring task中，只有cron类型的任务才用到Trigger，其他的固定固定周期执行和固定频率执行，还是用传统的模式。
+
+## 3.4 Task父类以及子类
+
+Task是所有Spring task的所有父类，比较简单，就是定义了runnable变量，用来存储业务逻辑，而其他周期性执行，延迟执行等参数留给子类实现
+
+```java
+public class Task {
+	private final Runnable runnable;
+}
+```
+
+其子类如下：
+
+![](./assets/Java任务调度-1647404373435.png)
+
+从图上可知，Task的子类分为两种：
+
+1. Trigger触发的Task。代表为CronTask
+2. 固定间歇执行的Task。代表为FixedDelayTask和FixedRateTask。其中FixedDelayTask和FixedRateTask本身没有任何实现，只是为了区分不同的调度方式（还记得Timer中的正负period吗），具体功能都是由父类IntervalTask承担。
+
+```java
+public class IntervalTask extends Task {
+    private final long interval;
+    private final long initialDelay;
+    public IntervalTask(Runnable runnable, long interval, long initialDelay) {
+        super(runnable);
+        this.interval = interval;
+        this.initialDelay = initialDelay;
+    }
+}
+public class FixedRateTask extends IntervalTask {
+    public FixedRateTask(Runnable runnable, long interval, long initialDelay) {
+        super(runnable, interval, initialDelay);
+    }
+}
+public class FixedDelayTask extends IntervalTask {
+    public FixedDelayTask(Runnable runnable, long interval, long initialDelay) {
+        super(runnable, interval, initialDelay);
+    }
+}
+```
+
+```java
+public class TriggerTask extends Task {
+	private final Trigger trigger;
+    public TriggerTask(Runnable runnable, Trigger trigger) {
+        super(runnable);
+        this.trigger = trigger;
+    }
+}
+
+public class CronTask extends TriggerTask {
+    private final String expression;
+    public CronTask(Runnable runnable, String expression) {
+        this(runnable, new CronTrigger(expression));
+    }
+}
+```
+
+## 3.3 TaskScheduler接口逻辑
 
 TaskScheduler 是Spring task中的任务调度接口，定义了一系列提交任务的方法，与 ScheduledExecutorService 角色相当。
 方法概览如下：
@@ -958,92 +1152,19 @@ public interface ScheduledExecutorService extends ExecutorService {
 ScheduledFuture<?> schedule(Runnable task, Trigger trigger);
 ```
 
-这个方法比较特殊，也是实现cron表达式的关键，依靠 Trigger。Trigger也很好理解，定义了获取下一次执行时间规范，由具体类去实现。
+这个方法比较特殊，也是实现cron表达式的关键，依靠 Trigger。Trigger在上一节已经有介绍。
 
-![](./assets/Java任务调度-1647253757369.png)
-
-```java
-public interface Trigger {
-    // 获取下一次执行时间
-	@Nullable
-	Date nextExecutionTime(TriggerContext triggerContext);
-}
-
-public interface TriggerContext {
-   
-   default Clock getClock() {
-      return Clock.systemDefaultZone();
-   }
-
-   //上一次计划执行时间
-   @Nullable
-   Date lastScheduledExecutionTime();
-   // 上一次具体执行时间
-   @Nullable
-   Date lastActualExecutionTime();
-   //完成四件
-   @Nullable
-   Date lastCompletionTime();
-
-}
-```
-
-```java
-
-public class CronTrigger implements Trigger {
-
-	private final CronExpression expression;
-
-	private final ZoneId zoneId;
-
-	public CronTrigger(String expression) {
-		this(expression, ZoneId.systemDefault());
-	}
-
-	public CronTrigger(String expression, TimeZone timeZone) {
-		this(expression, timeZone.toZoneId());
-	}
-
-	public CronTrigger(String expression, ZoneId zoneId) {
-		Assert.hasLength(expression, "Expression must not be empty");
-		Assert.notNull(zoneId, "ZoneId must not be null");
-
-		this.expression = CronExpression.parse(expression);
-		this.zoneId = zoneId;
-	}
-
-	@Override
-	public Date nextExecutionTime(TriggerContext triggerContext) {
-		Date date = triggerContext.lastCompletionTime();
-		if (date != null) {
-			Date scheduled = triggerContext.lastScheduledExecutionTime();
-			if (scheduled != null && date.before(scheduled)) {
-				// Previous task apparently executed too early...
-				// Let's simply use the last calculated execution time then,
-				// in order to prevent accidental re-fires in the same second.
-				date = scheduled;
-			}
-		}
-		else {
-			date = new Date(triggerContext.getClock().millis());
-		}
-		ZonedDateTime dateTime = ZonedDateTime.ofInstant(date.toInstant(), this.zoneId);
-		ZonedDateTime next = this.expression.next(dateTime);
-		return (next != null ? Date.from(next.toInstant()) : null);
-	}
-}
-
-```
-
-回头看下TaskScheduler，spring提供了三个实现类。
+看下TaskScheduler，spring提供了三个实现类。
 
 ![TaskScheduler](./assets/JAVA任务调度技术-1645515811598.png)
 
 实现类 ConcurrentTaskScheduler 注解上讲的很明白，就是一个将java.util.concurrent.ScheduledExecutorService 适配成 TaskScheduler 的适配器。
 其构造器如下
+
 ![ConcurrentTaskScheduler构造器](./assets/JAVA任务调度技术-1645516846964.png)
 
 ThreadPoolTaskScheduler 则是封装了ScheduledThreadPoolExecutor。
+
 ![1](./assets/JAVA任务调度技术-1645517482388.png)
 
 因此很明显，默认情况下，Spring-task的底层就是由ScheduledExecutorService来提供实际调度的。当然也可以自己实现一个TaskScheduler的实现类，但目前看来并没有理由再造一个这样的轮子。置于为什么没有直接使用ScheduledExecutorService，一是提供了一个新的方法提交Trigger。二是方便拓展，可以自己实现一个任务调度器。
@@ -1274,6 +1395,29 @@ SchedulingConfiguration只做了一件事情，那就是配置了ScheduledAnnota
 
 ScheduledAnnotationBeanPostProcessor实现了Spring的后置处理器，因此在Spring启动后，可以根据相应的配置或者注解，可以筛选出对应的方法，封装成为ScheduledTask，等待被调用。在Spring初始化完成后将会触发任务的调度。
 
+首先来看下 ScheduledMethodRunnable。ScheduledAnnotationBeanPostProcessor一个重要的目标就是将注解的方法封装成为ScheduledMethodRunnable。
+
+```java
+public class ScheduledMethodRunnable implements Runnable {
+	private final Object target;
+	private final Method method;
+
+	public ScheduledMethodRunnable(Object target, Method method) {
+		this.target = target;
+		this.method = method;
+	}
+
+    @Override
+    public void run() {
+        try {
+            ReflectionUtils.makeAccessible(this.method);
+            this.method.invoke(this.target);
+        } catch (InvocationTargetException ex) {
+        }
+    }
+}
+```
+
 ```java
 
 //只保留核心代码
@@ -1284,6 +1428,10 @@ public class ScheduledAnnotationBeanPostProcessor
   
     //用来缓存task和TaskScheduler调度器
    private final ScheduledTaskRegistrar registrar;
+
+    public ScheduledAnnotationBeanPostProcessor() {
+        this.registrar = new ScheduledTaskRegistrar();
+    }
 
    @Override
    public Object postProcessAfterInitialization(Object bean, String beanName) {
@@ -1359,19 +1507,17 @@ public class ScheduledAnnotationBeanPostProcessor
          // Check fixed delay
          long fixedDelay = convertToMillis(scheduled.fixedDelay(), scheduled.timeUnit());
          if (fixedDelay >= 0) {
-            Assert.isTrue(!processedSchedule, errorMessage);
             processedSchedule = true;
             tasks.add(this.registrar.scheduleFixedDelayTask(new FixedDelayTask(runnable, fixedDelay, initialDelay)));
          }
          // 3、处理字符串形式的Scheduled ,比如配置化${time:1000}
          String fixedDelayString = scheduled.fixedDelayString();
-         /延迟
+         //延迟
          if (StringUtils.hasText(fixedDelayString)) {
             if (this.embeddedValueResolver != null) {
                fixedDelayString = this.embeddedValueResolver.resolveStringValue(fixedDelayString);
             }
             if (StringUtils.hasLength(fixedDelayString)) {
-               Assert.isTrue(!processedSchedule, errorMessage);
                processedSchedule = true;
                try {
                   fixedDelay = convertToMillis(fixedDelayString, scheduled.timeUnit());
@@ -1387,7 +1533,6 @@ public class ScheduledAnnotationBeanPostProcessor
          // 3 固定频率的任务
          long fixedRate = convertToMillis(scheduled.fixedRate(), scheduled.timeUnit());
          if (fixedRate >= 0) {
-            Assert.isTrue(!processedSchedule, errorMessage);
             processedSchedule = true;
             tasks.add(this.registrar.scheduleFixedRateTask(new FixedRateTask(runnable, fixedRate, initialDelay)));
          }
@@ -1503,7 +1648,7 @@ public class ScheduledAnnotationBeanPostProcessor
 
 ## 3.6 ScheduledTaskRegistrar 类
 
-ScheduledTaskRegistrar是一个核心类，也是一个容器类，保存了所有的task的定义。同时也是真正将Task提交给调度器的地方。具体看以下代码。
+ScheduledTaskRegistrar是一个核心类，也是一个容器类，保存了所有的task的定义(这地方和xxl-job的类似)。同时也是真正将Task提交给调度器的地方。具体看以下代码。
 
 ```java
 public class ScheduledTaskRegistrar implements ScheduledTaskHolder, InitializingBean, DisposableBean {
@@ -1582,13 +1727,7 @@ public class ScheduledTaskRegistrar implements ScheduledTaskHolder, Initializing
       return (newTask ? scheduledTask : null);
    }
 
-   /**
-    * Schedule the specified cron task, either right away if possible
-    * or on initialization of the scheduler.
-    * @return a handle to the scheduled task, allowing to cancel it
-    * (or {@code null} if processing a previously registered task)
-    * @since 4.3
-    */
+  
    @Nullable
    public ScheduledTask scheduleCronTask(CronTask task) {
       ScheduledTask scheduledTask = this.unresolvedTasks.remove(task);
@@ -1607,14 +1746,7 @@ public class ScheduledTaskRegistrar implements ScheduledTaskHolder, Initializing
       return (newTask ? scheduledTask : null);
    }
 
-   /**
-    * Schedule the specified fixed-rate task, either right away if possible
-    * or on initialization of the scheduler.
-    * @return a handle to the scheduled task, allowing to cancel it
-    * (or {@code null} if processing a previously registered task)
-    * @since 4.3
-    * @deprecated as of 5.0.2, in favor of {@link #scheduleFixedRateTask(FixedRateTask)}
-    */
+  
    @Deprecated
    @Nullable
    public ScheduledTask scheduleFixedRateTask(IntervalTask task) {
@@ -1623,13 +1755,7 @@ public class ScheduledTaskRegistrar implements ScheduledTaskHolder, Initializing
       return scheduleFixedRateTask(taskToUse);
    }
 
-   /**
-    * Schedule the specified fixed-rate task, either right away if possible
-    * or on initialization of the scheduler.
-    * @return a handle to the scheduled task, allowing to cancel it
-    * (or {@code null} if processing a previously registered task)
-    * @since 5.0.2
-    */
+   
    @Nullable
    public ScheduledTask scheduleFixedRateTask(FixedRateTask task) {
       ScheduledTask scheduledTask = this.unresolvedTasks.remove(task);
@@ -1656,14 +1782,7 @@ public class ScheduledTaskRegistrar implements ScheduledTaskHolder, Initializing
       return (newTask ? scheduledTask : null);
    }
 
-   /**
-    * Schedule the specified fixed-delay task, either right away if possible
-    * or on initialization of the scheduler.
-    * @return a handle to the scheduled task, allowing to cancel it
-    * (or {@code null} if processing a previously registered task)
-    * @since 4.3
-    * @deprecated as of 5.0.2, in favor of {@link #scheduleFixedDelayTask(FixedDelayTask)}
-    */
+   
    @Deprecated
    @Nullable
    public ScheduledTask scheduleFixedDelayTask(IntervalTask task) {
@@ -1672,13 +1791,7 @@ public class ScheduledTaskRegistrar implements ScheduledTaskHolder, Initializing
       return scheduleFixedDelayTask(taskToUse);
    }
 
-   /**
-    * Schedule the specified fixed-delay task, either right away if possible
-    * or on initialization of the scheduler.
-    * @return a handle to the scheduled task, allowing to cancel it
-    * (or {@code null} if processing a previously registered task)
-    * @since 5.0.2
-    */
+   
    @Nullable
    public ScheduledTask scheduleFixedDelayTask(FixedDelayTask task) {
       ScheduledTask scheduledTask = this.unresolvedTasks.remove(task);
@@ -1690,12 +1803,10 @@ public class ScheduledTaskRegistrar implements ScheduledTaskHolder, Initializing
       if (this.taskScheduler != null) {
          if (task.getInitialDelay() > 0) {
             Date startTime = new Date(this.taskScheduler.getClock().millis() + task.getInitialDelay());
-            scheduledTask.future =
-                    this.taskScheduler.scheduleWithFixedDelay(task.getRunnable(), startTime, task.getInterval());
+            scheduledTask.future = this.taskScheduler.scheduleWithFixedDelay(task.getRunnable(), startTime, task.getInterval());
          }
          else {
-            scheduledTask.future =
-                    this.taskScheduler.scheduleWithFixedDelay(task.getRunnable(), task.getInterval());
+            scheduledTask.future = this.taskScheduler.scheduleWithFixedDelay(task.getRunnable(), task.getInterval());
          }
       }
       else {
@@ -1712,13 +1823,15 @@ public class ScheduledTaskRegistrar implements ScheduledTaskHolder, Initializing
 
 从前面的代码中我们知道， Spring-task默认使用  ScheduledExecutorService 作为底层逻辑，但是ScheduledExecutorService并不支持cron表达式。不过可以通过将cron表达式的任务封装成ScheduledExecutorService支持的参数即可。基本思想是将任务当成一次延时任务即可，等执行完上一次任务之后，如果还有下次，则重新提交到调度器。也就是：
 
-> 1、将task在封装一层成为CronTask，
+> 1、将task在封装一层成为 ReschedulingRunnable，
 > 2、计算cron的下次执行时间与当前的时间差delay。
 > 3、调用提交任务。让任务延迟delay执行一次，注意只执行一次。
 > 4、执行业务 run 方法。
 > 5、重复执行2-4即可。
 
 这个思路与ScheduledExecutorService获取task后再提交到队列中的思路是一样的。具体代码参考 ReschedulingRunnable 类和 CronTask 类。
+
+![](./assets/Java任务调度-1647424183352.png)
 
 ```java
 class ReschedulingRunnable extends DelegatingErrorHandlingRunnable implements ScheduledFuture<Object> {
@@ -1746,6 +1859,24 @@ class ReschedulingRunnable extends DelegatingErrorHandlingRunnable implements Sc
 		this.executor = executor;
 	}
 
+    @Override
+    public void run() {
+        //实际执行时间
+        Date actualExecutionTime = new Date(this.triggerContext.getClock().millis());
+        //执行业务方法
+        super.run();
+        //完成时间
+        Date completionTime = new Date(this.triggerContext.getClock().millis());
+        synchronized (this.triggerContextMonitor) {
+            //更新相关参数
+            this.triggerContext.update(this.scheduledExecutionTime, actualExecutionTime, completionTime);
+            //判断是否可以继续执行
+            if (!obtainCurrentFuture().isCancelled()) {
+                //继续提交任务
+                schedule();
+            }
+        }
+    }
   
 	@Nullable
 	public ScheduledFuture<?> schedule() {
@@ -1753,6 +1884,7 @@ class ReschedulingRunnable extends DelegatingErrorHandlingRunnable implements Sc
             //获取下次执行时间
 			this.scheduledExecutionTime = this.trigger.nextExecutionTime(this.triggerContext);
 			if (this.scheduledExecutionTime == null) {
+                //没有下次时间，终止执行
 				return null;
 			}
 			long initialDelay = this.scheduledExecutionTime.getTime() - this.triggerContext.getClock().millis();
@@ -1762,30 +1894,14 @@ class ReschedulingRunnable extends DelegatingErrorHandlingRunnable implements Sc
 		}
 	}
 
-	@Override
-	public void run() {
-		Date actualExecutionTime = new Date(this.triggerContext.getClock().millis());
-        //执行业务方法
-		super.run();
-		Date completionTime = new Date(this.triggerContext.getClock().millis());
-		synchronized (this.triggerContextMonitor) {
-			Assert.state(this.scheduledExecutionTime != null, "No scheduled execution");
-            //更新相关参数
-			this.triggerContext.update(this.scheduledExecutionTime, actualExecutionTime, completionTime);
-            //判断是否可以继续执行
-			if (!obtainCurrentFuture().isCancelled()) {
-                //继续提交任务
-				schedule();
-			}
-		}
-	}
+
     //省略其他代码。。。
 }
 ```
 
 ## 3.8 Spring task使用注意事项
 
-使用spring task需要注意的是，如果我们没有配置TaskScheduler实例，默认情况下使用 Executors.newSingleThreadScheduledExecutor()新建了一个实例，这个实例只有一个线程处理任务，在任务耗时比较高的情况下会有可能发生阻塞。最好是配置一个ScheduledExecutorService实例交给Spring管理
+通过ScheduledAnnotationBeanPostProcessor查找TaskScheduler的过程，以及ScheduledTaskRegistrar调度过程，我们知道，如果我们没有配置TaskScheduler实例，默认情况下使用 Executors.newSingleThreadScheduledExecutor()新建了一个实例，这个实例只有一个线程处理任务，在任务耗时比较高的情况下会有可能发生阻塞。最好是配置一个ScheduledExecutorService实例交给Spring管理
 
 如：
 
@@ -1821,1495 +1937,6 @@ public class Application2 {
 
 ## 3.9 总结
 
-spring task中任务处理器为TaskScheduler实现类，任务为Trigger的实现类。基本的思想还是与 ScheduledExecutorService 想类似的。在默认情况下也是使用ScheduledExecutorService作为任务的处理器。
+spring task中任务处理器为TaskScheduler实现类，任务为Task的子类。
 
-# 4 XXL-JOB
-
-XXL-JOB是一个分布式任务调度平台，其核心设计目标是开发迅速、学习简单、轻量级、易扩展。现已开放源代码并接入多家公司线上产品线，开箱即用。由于是国产开发的，中文文档，而且很全面，具体使用方法可以直接看官方文档 [《分布式任务调度平台XXL-JOB》-官方文档](https://www.xuxueli.com/xxl-job/) 。
-
-最初XXL-JOB的底层是Quartz，后来发现Quartz比较复杂，不利于扩展和维护，因此自研了一个调度器，简单但是很实用，很值得学习。
-
-## 4.1 为什么我们需要一个分布式的调度平台
-
-前面介绍的Timer, ScheduledExcutorService 和 Spring Task，都是针对单个实例内的任务调度，在分布式部署的时候，可能会有一定的问题。比如假设有一个任务A，是给用户发送消息的，设置每一秒执行一次，如果部署了3个实例，那么就会变成每秒执行3次，调度频率随着实例的增多而增多，如果没有加全局锁，会出现重复发送的问题。此外在实际的业务中，我们还有可能需要随时JOB的调度周期，随时停止和启动一个任务等，这些操作都需要发版才能实现。因此在分布式系统中，有一个分布式调度器尤为重要。
-
-## 4.2 XXL-JOB 的模块
-
-从[github](https://github.com/xuxueli/xxl-job/) 上下载源码，可以看到XXL-JOB的核心模块分为2个，xxl-job-admin 和 xxl-job-core。另外的xxl-job-executor-samples是一个例子模块
-
-![xxl-job模块](./assets/JAVA任务调度技术-xxl-job模块-1645156061685.png)
-
-核心模块的作用如下：
-
-
-| 模块          | 说明               | 功能                       |
-| --------------- | -------------------- | ---------------------------- |
-| xxl-job-admin | 服务端（调度中心） | 管理界面+任务调度          |
-| xxl-job-core  | 客户端（执行器）   | 在项目中引用，执行业务逻辑 |
-
-从模块划分可以看出，xxl-job的任务调度和任务的执行是分开的，客户端只管执行任务，不用管任务单的调度。任务调度是由服务端执行，这样各司其职，进行了解耦，提高系统整体稳定性和扩展性
-
-官方架构图
-![官方架构图](./assets/JAVA任务调度技术-1645426939228.png)
-
-如果大家心中没有任务调度的概念，直接看官方架构图是有些吃力的，因此我做了简化，保留了核心部分，如下图：
-
-![image.png](./assets/1645712986102-image.png)
-
-从上图可以看出，XXL-JOB框架分为三个结构。
-
-> 1、Mysql：存储相关信息
-> 2、客户端：将自己注册到服务端，等待任务下发。
-> 3、服务端：维护JOB的信息，将需要执行的JOB，通过一定的策略，找到对应的客户端地址，发送HTTP请求，客户端执行即可。
-
-## 4.3 xxl-job-admin 解析
-
-**服务端**核心类如下：
-
-
-| 类                   | 功能                                             |
-| ---------------------- | -------------------------------------------------- |
-| JobScheduleHelper    | 调度器，将需要执行的JOB提交到线程池              |
-| XxlJobInfo           | 实体类，记录了一个任务的配置，持久化到mysql中    |
-| JobTriggerPoolHelper | 线程池，多个线程发送job到客户端                  |
-| XxlJobTrigger        | 触发器， 真正处理 XxlJobInfo并发送到制定的客户端 |
-| JobRegistryHelper    | 注册中心 ，接收客户端的注册和心跳                |
-
-以上类处于com.xxl.job.admin.core包
-
-### 4.3.1 服务端初始化入口
-
-admin的初始化入口在XxlJobAdminConfig，是InitializingBean的实现类，因此在spring配置文件初始化完成后就触发了XXL-JOB的初始化
-
-```java
-@Component
-public class XxlJobAdminConfig implements InitializingBean, DisposableBean {
-
-    private XxlJobScheduler xxlJobScheduler;
-
-    @Override
-    public void afterPropertiesSet() throws Exception {
-        adminConfig = this;
-
-        xxlJobScheduler = new XxlJobScheduler();
-        xxlJobScheduler.init();
-    }
-    //省略
-}
-```
-
-从上边可以看到，真正执行初始化的类是XxlJobScheduler，初始化逻辑在init()方法中。
-
-```java
-public class XxlJobScheduler  {
-
-   //启动了一些列的线程或者线程池来来处理相关逻辑
-    public void init() throws Exception {
-        // init i18n
-        initI18n();
-
-        // admin trigger pool start
-        JobTriggerPoolHelper.toStart();
-
-        // admin registry monitor run
-        JobRegistryHelper.getInstance().start();
-
-        // admin fail-monitor run
-        JobFailMonitorHelper.getInstance().start();
-
-        // admin lose-monitor run ( depend on JobTriggerPoolHelper )
-        JobCompleteHelper.getInstance().start();
-
-        // admin log report start
-        JobLogReportHelper.getInstance().start();
-
-        // start-schedule  ( depend on JobTriggerPoolHelper )
-        JobScheduleHelper.getInstance().start();
-    }
-    //省略。。。
-}
-```
-
-服务端初始化流程图如下：
-
-![xxl-job-服务端-初始化步骤.png](./assets/JAVA任务调度技术-1645425368228.png)
-
-XXL-JOB服务端在初始化过程中启动了多个后台线程或者线程池，用于异步处理多项任务。
-
-### 4.3.2 JobScheduleHelper 类
-
-从前面对任务调度的介绍可以看出，一个任务调度器，离不开
-
-> 1.带有执行时间的任务列表
-> 2.轮询执行任务的调度器
-
-XXL-JOB 也不例外。其中JobScheduleHelper类就属于轮询执行任务的调度器，包含了任务调用的基本逻辑，属于必看的类
-
-具体代码如下
-
-```java
-
-public class JobScheduleHelper {
-    //预读5秒
-    public static final long PRE_READ_MS = 5000;    // pre read
-    //时间轮刻度-任务ID映射表
-    private volatile static Map<Integer, List<Integer>> ringData = new ConcurrentHashMap<>();
-
-    public void start(){
-        scheduleThread = new Thread(new Runnable() {
-            @Override
-            public void run() {
-                // 按照默认配置 （快200+慢100）* 20 = 6000
-                int preReadCount = (XxlJobAdminConfig.getAdminConfig().getTriggerPoolFastMax() + XxlJobAdminConfig.getAdminConfig().getTriggerPoolSlowMax()) * 20;
-
-                while (!scheduleThreadToStop) {
-                    // Scan Job
-                    long start = System.currentTimeMillis();
-                    //数据库连接
-                    Connection conn = null;
-                    PreparedStatement preparedStatement = null;
-
-                    boolean preReadSuc = true;
-                    try {
-
-                        conn = XxlJobAdminConfig.getAdminConfig().getDataSource().getConnection();
-                        conn.setAutoCommit(false);
-                        //加锁
-                        preparedStatement = conn.prepareStatement(  "select * from xxl_job_lock where lock_name = 'schedule_lock' for update" );
-                        preparedStatement.execute();
-
-                        // 1、预读 查询数据库，获取下次执行时间 <= 当前时间+5秒 的所有JOB
-                        long nowTime = System.currentTimeMillis();
-  
-                        //SELECT * FROM xxl_job_info AS t WHERE t.trigger_status = 1 and t.trigger_next_time <= #{maxNextTime} ORDER BY id ASC LIMIT #{pagesize}
-                        List<XxlJobInfo> scheduleList = XxlJobAdminConfig.getAdminConfig().getXxlJobInfoDao().scheduleJobQuery(nowTime + PRE_READ_MS, preReadCount);
-  
-                        if (scheduleList!=null && scheduleList.size()>0) {
-                            // 2、遍历处理JOB，看是直接提交给线程池还是先提交到 time-ring后再提交给线程池。
-                            for (XxlJobInfo jobInfo: scheduleList) {
-                                // time-ring jump
-                                if (nowTime > jobInfo.getTriggerNextTime() + PRE_READ_MS) {
-                                    // 2.1、超时>5秒以上，当做错失触发时机
-
-                                    // 1、超时触发策略
-                                    MisfireStrategyEnum misfireStrategyEnum = MisfireStrategyEnum.match(jobInfo.getMisfireStrategy(), MisfireStrategyEnum.DO_NOTHING);
-  
-                                    if (MisfireStrategyEnum.FIRE_ONCE_NOW == misfireStrategyEnum) {
-                                        // FIRE_ONCE_NOW 》 trigger
-                                        JobTriggerPoolHelper.trigger(jobInfo.getId(), TriggerTypeEnum.MISFIRE, -1, null, null, null);
-                                    }
-                                    // 2、更新时间
-                                    refreshNextValidTime(jobInfo, new Date());
-
-                                } else if (nowTime > jobInfo.getTriggerNextTime()) {
-                                    // 2.2、超时时间在5秒以内
-                                    // 1、提交到线程池
-                                    JobTriggerPoolHelper.trigger(jobInfo.getId(), TriggerTypeEnum.CRON, -1, null, null, null);
-                                    // 2、刷新一次时间
-                                    refreshNextValidTime(jobInfo, new Date());
-                                    if (jobInfo.getTriggerStatus()==1 && nowTime + PRE_READ_MS > jobInfo.getTriggerNextTime()) {
-                                       //下次执行在5秒内，说明下次循环还有它，可以再预读一次，直接提交到时间轮，提高想能
-                                        // 1、计算时间轮刻度
-                                        int ringSecond = (int)((jobInfo.getTriggerNextTime()/1000)%60);
-                                        // 2、提交到时间轮
-                                        pushTimeRing(ringSecond, jobInfo.getId());
-                                        // 3、再更新一次时间
-                                        refreshNextValidTime(jobInfo, new Date(jobInfo.getTriggerNextTime()));
-
-                                    }
-
-                                } else {
-                                    // 2.3、未到执行时间
-                                    // 1、计算时间轮刻度
-                                    int ringSecond = (int)((jobInfo.getTriggerNextTime()/1000)%60);
-                                    // 2、提交到时间轮线程
-                                    pushTimeRing(ringSecond, jobInfo.getId());
-                                    // 3、刷新
-                                    refreshNextValidTime(jobInfo, new Date(jobInfo.getTriggerNextTime()));
-                                }
-                            }
-                            // 3、将修改了下次执行时间的任务存到数据库中
-                            for (XxlJobInfo jobInfo: scheduleList) {
-                                XxlJobAdminConfig.getAdminConfig().getXxlJobInfoDao().scheduleUpdate(jobInfo);
-                            }
-                        } else {
-                            preReadSuc = false;
-                        }
-                    } finally {
-                        //省略处理数据库连接
-                    }
-                    long cost = System.currentTimeMillis()-start;
-                    //省略。。。
-                }
-            }
-        });
-        scheduleThread.setDaemon(true);
-        scheduleThread.setName("xxl-job, admin JobScheduleHelper#scheduleThread");
-        scheduleThread.start();
-  
-        // ring thread
-        ringThread = new Thread(new Runnable() {
-            @Override
-            public void run() {
-
-                while (!ringThreadToStop) {
-
-                    //时间轮代码，忽略
-                }
-                logger.info(">>>>>>>>>>> xxl-job, JobScheduleHelper#ringThread stop");
-            }
-        });
-        ringThread.setDaemon(true);
-        ringThread.setName("xxl-job, admin JobScheduleHelper#ringThread");
-        ringThread.start();
-    }
-    //忽略其他代码
-}
-
-```
-
-源码逻辑解析
-![xxl-job-JobScheduleHelper.png](./assets/JAVA任务调度技术-1645410062917.png)
-
-从以上逻辑看，XXL-JOB的核心逻辑与JDK的 ScheduledExecutorService 是基本类似的。都是先从一个队列（xxl-job是使用mysql排序）中取出JOB，然后提交给线程池处理。
-
-但有一点区别：XXL-JOB是从数据库读取数据，因此为了提高性能，做了一个预读5秒的变化。未到时间执行的job提交给时间轮，再由时间轮提交给线程池处理。
-
-### 4.3.3  XxlJobTrigger 类
-
-经过JobScheduleHelper调度，job的参数会被提交的线程池，线程池由JobTriggerPoolHelper实现，比较简单，不再描述，然后最终会使用 XxlJobTrigger 是触发执行job的地方。
-
-```java
-public class XxlJobTrigger {
-   
-    public static void trigger(int jobId,
-                               TriggerTypeEnum triggerType,
-                               int failRetryCount,
-                               String executorShardingParam,
-                               String executorParam,
-                               String addressList) {
-
-        //1、 从数据库获取job配置
-        XxlJobInfo jobInfo = XxlJobAdminConfig.getAdminConfig().getXxlJobInfoDao().loadById(jobId);
-        if (jobInfo == null) {
-            return;
-        }
-        if (executorParam != null) {
-            //如果传参就覆盖
-            jobInfo.setExecutorParam(executorParam);
-        }
-        int finalFailRetryCount = failRetryCount>=0?failRetryCount:jobInfo.getExecutorFailRetryCount();
-  
-        // 2 从数据库获取分组信息（本质就是获取接收job的地址）
-        XxlJobGroup group = XxlJobAdminConfig.getAdminConfig().getXxlJobGroupDao().load(jobInfo.getJobGroup());
-
-        // cover addressList
-        if (addressList!=null && addressList.trim().length()>0) {
-            group.setAddressType(1);
-            //传参的话就覆盖
-            group.setAddressList(addressList.trim());
-        }
-
-        // sharding param
-        int[] shardingParam = null;
-        if (executorShardingParam!=null){
-            String[] shardingArr = executorShardingParam.split("/");
-            if (shardingArr.length==2 && isNumeric(shardingArr[0]) && isNumeric(shardingArr[1])) {
-                shardingParam = new int[2];
-                shardingParam[0] = Integer.valueOf(shardingArr[0]);
-                shardingParam[1] = Integer.valueOf(shardingArr[1]);
-            }
-        }
-        if (ExecutorRouteStrategyEnum.SHARDING_BROADCAST==ExecutorRouteStrategyEnum.match(jobInfo.getExecutorRouteStrategy(), null)
-                && group.getRegistryList()!=null && !group.getRegistryList().isEmpty()
-                && shardingParam==null) {
-            //分片
-            for (int i = 0; i < group.getRegistryList().size(); i++) {
-                processTrigger(group, jobInfo, finalFailRetryCount, triggerType, i, group.getRegistryList().size());
-            }
-        } else {
-            if (shardingParam == null) {
-                //分片参数，这里意思是只发给一个地址。
-                shardingParam = new int[]{0, 1};
-            }
-            processTrigger(group, jobInfo, finalFailRetryCount, triggerType, shardingParam[0], shardingParam[1]);
-        }
-
-    }
-
-    /**
-     * @param group                     job group, registry list may be empty
-     * @param jobInfo
-     * @param finalFailRetryCount  纯粹是为了打日志
-     * @param triggerType          为了打日志
-     * @param index                     sharding index
-     * @param total                     sharding index
-     */
-    private static void processTrigger(XxlJobGroup group, XxlJobInfo jobInfo, int finalFailRetryCount, TriggerTypeEnum triggerType, int index, int total){
-
-        //阻塞策略
-        ExecutorBlockStrategyEnum blockStrategy = ExecutorBlockStrategyEnum.match(jobInfo.getExecutorBlockStrategy(), ExecutorBlockStrategyEnum.SERIAL_EXECUTION);  // block strategy
-       //路由策略 就是如何发给客户端，如第一个，最后一个，一致性哈希
-        ExecutorRouteStrategyEnum executorRouteStrategyEnum = ExecutorRouteStrategyEnum.match(jobInfo.getExecutorRouteStrategy(), null);    // route strategy
-       //分片参数 日志记录用
-        String shardingParam = (ExecutorRouteStrategyEnum.SHARDING_BROADCAST==executorRouteStrategyEnum)?String.valueOf(index).concat("/").concat(String.valueOf(total)):null;
-
-        // 1、save log-id
-        XxlJobLog jobLog = new XxlJobLog();
-        jobLog.setJobGroup(jobInfo.getJobGroup());
-        jobLog.setJobId(jobInfo.getId());
-        jobLog.setTriggerTime(new Date());
-  
-        //记录日志
-        XxlJobAdminConfig.getAdminConfig().getXxlJobLogDao().save(jobLog);
-
-        // 2、组装参数
-        TriggerParam triggerParam = new TriggerParam();
-        triggerParam.setJobId(jobInfo.getId());
-        triggerParam.setExecutorHandler(jobInfo.getExecutorHandler());
-        triggerParam.setExecutorParams(jobInfo.getExecutorParam());
-        triggerParam.setExecutorBlockStrategy(jobInfo.getExecutorBlockStrategy());
-        triggerParam.setExecutorTimeout(jobInfo.getExecutorTimeout());
-        triggerParam.setLogId(jobLog.getId());
-        triggerParam.setLogDateTime(jobLog.getTriggerTime().getTime());
-        triggerParam.setGlueType(jobInfo.getGlueType());
-        triggerParam.setGlueSource(jobInfo.getGlueSource());
-        triggerParam.setGlueUpdatetime(jobInfo.getGlueUpdatetime().getTime());
-        triggerParam.setBroadcastIndex(index);
-        triggerParam.setBroadcastTotal(total);
-
-        // 3、init address
-        String address = null;
-        ReturnT<String> routeAddressResult = null;
-        if (group.getRegistryList()!=null && !group.getRegistryList().isEmpty()) {
-            if (ExecutorRouteStrategyEnum.SHARDING_BROADCAST == executorRouteStrategyEnum) {
-                //广播模式，获取指定下标的 url 。
-                if (index < group.getRegistryList().size()) {
-                    address = group.getRegistryList().get(index);
-                } else {
-                    address = group.getRegistryList().get(0);
-                }
-            } else {
-                //根据路由策略获取 url.
-                routeAddressResult = executorRouteStrategyEnum.getRouter().route(triggerParam, group.getRegistryList());
-                if (routeAddressResult.getCode() == ReturnT.SUCCESS_CODE) {
-                    address = routeAddressResult.getContent();
-                }
-            }
-        } else {
-            routeAddressResult = new ReturnT<String>(ReturnT.FAIL_CODE, I18nUtil.getString("jobconf_trigger_address_empty"));
-        }
-
-        // 4、trigger remote executor
-        ReturnT<String> triggerResult = null;
-        if (address != null) {
-            triggerResult = runExecutor(triggerParam, address);
-        } else {
-            triggerResult = new ReturnT<String>(ReturnT.FAIL_CODE, null);
-        }
-  
-        // 5、collection trigger info
-        //忽略一长串组装日志代码
-   
-        //保存日志
-        XxlJobAdminConfig.getAdminConfig().getXxlJobLogDao().updateTriggerInfo(jobLog);
-    }
-
-  
-    //根据地址url，将参数发送到指定的客户端。
-    public static ReturnT<String> runExecutor(TriggerParam triggerParam, String address){
-        ReturnT<String> runResult = null;
-        try {
-            ExecutorBiz executorBiz = XxlJobScheduler.getExecutorBiz(address);
-            runResult = executorBiz.run(triggerParam);
-        } catch (Exception e) {
-            logger.error(">>>>>>>>>>> xxl-job trigger error, please check if the executor[{}] is running.", address, e);
-            runResult = new ReturnT<String>(ReturnT.FAIL_CODE, ThrowableUtil.toString(e));
-        }
-
-        StringBuffer runResultSB = new StringBuffer(I18nUtil.getString("jobconf_trigger_run") + "：");
-        runResultSB.append("<br>address：").append(address);
-        runResultSB.append("<br>code：").append(runResult.getCode());
-        runResultSB.append("<br>msg：").append(runResult.getMsg());
-
-        runResult.setMsg(runResultSB.toString());
-        return runResult;
-    }
-
-}
-
-```
-
-总结以上XxlJobTrigger类的代码，做了几件事
-
-> 1、根据jobId从数据库获取job参数
-> 2、根据job参数获取groupId后，再获取分组信息，里面包含了分组中的客户端 ip:port地址。
-> 3、根据路由策略，获取指定的address，将job参数通过http发送往客户端。
-> 4、记录日志。
-
-### 4.3.4 JobRegistryHelper 类
-
-客户端会定时上报自身的ip+port，JobRegistryHelper就是专门处理这些信息的。
-实现类比较简单，就补贴源码了，只讲一下逻辑。
-1、定义了一个线程池，专门保存或者修改用来处理客户端上报的address。
-2、定义了一个后台线程，周期性（30s）处理以下逻辑：清除过期的客户端注册信息（30*3s不上报），将最新的address更新到各自的任务组中。
-
-### 4.3.4 路由策略
-
-路由策略抽象类为 ExecutorRouter，在配置job的时候指定的路由策略，就有对应的ExecutorRouter子类去实现。
-
-```java
-public abstract class ExecutorRouter {
-
-    /**
-     * route address
-     * @param addressList
-     * @return  ReturnT.content=address
-     */
-    public abstract ReturnT<String> route(TriggerParam triggerParam, List<String> addressList);
-
-}
-```
-
-> 1、第一个：直接取addressList第一个地址
-> 2、最后一个：直接取 addressList最后地址
-> 3、轮询: 对调度次数进行计数n，n%addressList.size获取地址下标。
-> 4、随机: 随机取一个。
-> 5、一致性hash: 使用java.util.TreeMap.tailMap()方法来实现。[负载均衡之一致性哈希环算法](http://betheme.net/news/txtlist_i105436v.html)
-> 6、最不经常使用：LFU(Least Frequently Used)：最不经常使用，频率/次数
-> 7、最近最久未使用：LRU(Least Recently Used)：最近最久未使用，时间
-> 8、故障转移：对addressList进行循环http请求，第一个正常返回的地址作为调度地州。
-> 9、忙碌转移：通过http请求客户端检查JobThread，第一个空闲的客户端作为调度客户端。
-> 10、分片广播：发送给所有的客户端。
-
-## 4.4 客户端逻辑
-
-**客户端**核心类如下：
-
-![xxl-job-客户端-初始化步骤.png](./assets/JAVA任务调度技术-1645426033285.png)
-
-
-| 类              | 功能             | 说明                                                                                                          |
-| ----------------- | ------------------ | --------------------------------------------------------------------------------------------------------------- |
-| XxlJob          | Task注解         | 被标注的方法将会被处理成为 IJobHandler, 与@Scheduled注解功能相似 （19年底新增注解）。 每个IJobHandler有唯标识 |
-| EmbedServer     | 客户端server     | 启动一个netty,用于接收服务端的调度                                                                            |
-| ExecutorBizImpl | 处理服务端的请求 | EmbedServer接收请求后，实际交给ExecutorBizImpl进行处理，里面有处理阻塞策略                                    |
-| TriggerParam    | 触发参数         | 记录服务端发送过来的任务                                                                                      |
-| JobThread       | Job线程          | 用 LinkedBlockingQueue 缓存服务端传递过来的 TriggerParam。轮询 LinkedBlockingQueue，顺序处理同一个job的任务   |
-| IJobHandler     | Task抽象类       | 被@XxlJob的注释的方法，或者通过服务端传递过来的代码，将会封装成为一个  IJobHandler    实现类                  |
-| XxlJobContext   | 上下文           | 内置InheritableThreadLocal，在线程中存储变量，供给IJobHandler                                                 |
-
-从以上表格基本可以看出客户端的执行逻辑，其中比较重要的是 ExecutorBizImpl 和 JobThread，以及XxlJob注解的原理。 将会对这三个类进行介绍。
-
-### 4.4.1 @XxlJob 注解原理
-
-在客户端引入XXL-JOB的时候，一般需要进行如下配置
-
-```java
-    @Bean
-    public XxlJobSpringExecutor xxlJobExecutor() {
-        logger.info(">>>>>>>>>>> xxl-job config init.");
-        XxlJobSpringExecutor xxlJobSpringExecutor = new XxlJobSpringExecutor();
-        xxlJobSpringExecutor.setAdminAddresses(adminAddresses);
-        xxlJobSpringExecutor.setAppname(appname);
-        xxlJobSpringExecutor.setAddress(address);
-        xxlJobSpringExecutor.setIp(ip);
-        xxlJobSpringExecutor.setPort(port);
-        xxlJobSpringExecutor.setAccessToken(accessToken);
-        xxlJobSpringExecutor.setLogPath(logPath);
-        xxlJobSpringExecutor.setLogRetentionDays(logRetentionDays);
-        return xxlJobSpringExecutor;
-    }
-```
-
-查看XxlJobSpringExecutor 具体代码如下
-
-```java
-public class XxlJobSpringExecutor extends XxlJobExecutor implements ApplicationContextAware, SmartInitializingSingleton, DisposableBean {
-
-    // start
-    @Override
-    public void afterSingletonsInstantiated() {
-
-        // init JobHandler Repository (for method)
-        initJobHandlerMethodRepository(applicationContext);
-
-        // refresh GlueFactory
-        GlueFactory.refreshInstance(1);
-
-        // super start
-        try {
-            super.start();
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
-    }
-
-  
-    //通过Spring的ApplicationContext，获取到使用了@XxlJob注解的类，缓存起来。
-    private void initJobHandlerMethodRepository(ApplicationContext applicationContext) {
-        if (applicationContext == null) {
-            return;
-        }
-        // init job handler from method
-        String[] beanDefinitionNames = applicationContext.getBeanNamesForType(Object.class, false, true);
-        for (String beanDefinitionName : beanDefinitionNames) {
-            Object bean = applicationContext.getBean(beanDefinitionName);
-
-            Map<Method, XxlJob> annotatedMethods = null;   // referred to ：org.springframework.context.event.EventListenerMethodProcessor.processBean
-            try {
-                annotatedMethods = MethodIntrospector.selectMethods(bean.getClass(),
-                        new MethodIntrospector.MetadataLookup<XxlJob>() {
-                            @Override
-                            public XxlJob inspect(Method method) {
-                                return AnnotatedElementUtils.findMergedAnnotation(method, XxlJob.class);
-                            }
-                        });
-            } catch (Throwable ex) {
-                logger.error("xxl-job method-jobhandler resolve error for bean[" + beanDefinitionName + "].", ex);
-            }
-            if (annotatedMethods==null || annotatedMethods.isEmpty()) {
-                continue;
-            }
-
-            for (Map.Entry<Method, XxlJob> methodXxlJobEntry : annotatedMethods.entrySet()) {
-                Method executeMethod = methodXxlJobEntry.getKey();
-                XxlJob xxlJob = methodXxlJobEntry.getValue();
-                // 父类核心方法
-                registJobHandler(xxlJob, bean, executeMethod);
-            }
-        }
-    }
-
-  
-
-}
-```
-
-继续看父类XxlJobExecutor，可以看到使用一个ConcurrentMap缓存了包装过的业务方法。其中key为每个job的唯一标识，与服务端的key一一对应。
-
-```java
-public class XxlJobExecutor {
-    //使用一个ConcurrentMap缓存了包装过的业务方法。其中key为每个job的唯一标识，与服务端的key一一对应。
-    private static ConcurrentMap<String, IJobHandler> jobHandlerRepository = new ConcurrentHashMap<String, IJobHandler>();
-
-    protected void registJobHandler(XxlJob xxlJob, Object bean, Method executeMethod){
-        if (xxlJob == null) {
-            return;
-        }
-
-        String name = xxlJob.value();
-        //make and simplify the variables since they'll be called several times later
-        Class<?> clazz = bean.getClass();
-        String methodName = executeMethod.getName();
-        if (name.trim().length() == 0) {
-            throw new RuntimeException("xxl-job method-jobhandler name invalid, for[" + clazz + "#" + methodName + "] .");
-        }
-        if (loadJobHandler(name) != null) {
-            throw new RuntimeException("xxl-job jobhandler[" + name + "] naming conflicts.");
-        }
-
-   
-
-        executeMethod.setAccessible(true);
-
-        // init and destroy
-        Method initMethod = null;
-        Method destroyMethod = null;
-        //初始化代码
-        if (xxlJob.init().trim().length() > 0) {
-            try {
-                initMethod = clazz.getDeclaredMethod(xxlJob.init());
-                initMethod.setAccessible(true);
-            } catch (NoSuchMethodException e) {
-                throw new RuntimeException("xxl-job method-jobhandler initMethod invalid, for[" + clazz + "#" + methodName + "] .");
-            }
-        }
-        //销毁代码
-        if (xxlJob.destroy().trim().length() > 0) {
-            try {
-                destroyMethod = clazz.getDeclaredMethod(xxlJob.destroy());
-                destroyMethod.setAccessible(true);
-            } catch (NoSuchMethodException e) {
-                throw new RuntimeException("xxl-job method-jobhandler destroyMethod invalid, for[" + clazz + "#" + methodName + "] .");
-            }
-        }
-
-        // registry jobhandler
-        registJobHandler(name, new MethodJobHandler(bean, executeMethod, initMethod, destroyMethod));
-
-    }
-    public static IJobHandler registJobHandler(String name, IJobHandler jobHandler){
-        logger.info(">>>>>>>>>>> xxl-job register jobhandler success, name:{}, jobHandler:{}", name, jobHandler);
-        return jobHandlerRepository.put(name, jobHandler);
-    }
-}
-```
-
-最终包装成为了MethodJobHandler
-
-```java
-public class MethodJobHandler extends IJobHandler {
-
-    private final Object target;
-    private final Method method;
-    private Method initMethod;
-    private Method destroyMethod;
-}
-```
-
-以上流程总结如下
-
-> 在spring启动，所有单例类都创建完成后，触发从ApplicationContext获取所有标注了 @XxlJob的bean和对应方法。最终封装成为MethodJobHandler，存储到了了一个ConcurrentMap中。key为JOB的唯一标识，与服务端一对一对应。等待服务端的调用。
-
-### 4.4.2 JobThread
-
-从@XxlJob的原理，可以看到，一个job最终会被封装成为MethodJobHandler，那么客户端如何处理服务端下发的调度任务呢。
-J
-obThread是真正客户端真正执行任务的地方。每一个JAVA类型的JOB都会对应一个JobThread。
-
-```java
-public class JobThread extends Thread{
-	private static Logger logger = LoggerFactory.getLogger(JobThread.class);
-
-	private int jobId;
-    //标注了@XxlJob的方法或者从前端传过来的代码脚本。
-	private IJobHandler handler;
-    // 存储服务端穿过来的请求，如果前一个任务没有执行文，后续的会继续存在这里。
-	private LinkedBlockingQueue<TriggerParam> triggerQueue;
-    // 服务端每发送一次到客户端，会生成一个唯一的JOBid，可以用来做幂等，防止HTTP请求重试等造成重复调用。
-	private Set<Long> triggerLogIdSet;
-
-	private volatile boolean toStop = false;
-	private String stopReason;
-
-    private boolean running = false;    // if running job
-	private int idleTimes = 0;			// idel times
-
-
-	public JobThread(int jobId, IJobHandler handler) {
-		this.jobId = jobId;
-		this.handler = handler;
-		this.triggerQueue = new LinkedBlockingQueue<TriggerParam>();
-		this.triggerLogIdSet = Collections.synchronizedSet(new HashSet<Long>());
-
-		// assign job thread name
-		this.setName("xxl-job, JobThread-"+jobId+"-"+System.currentTimeMillis());
-	}
-	public IJobHandler getHandler() {
-		return handler;
-	}
-
-    //存储服务端调度请求
-	public ReturnT<String> pushTriggerQueue(TriggerParam triggerParam) {
-		// avoid repeat
-		if (triggerLogIdSet.contains(triggerParam.getLogId())) {
-			logger.info(">>>>>>>>>>> repeate trigger job, logId:{}", triggerParam.getLogId());
-			return new ReturnT<String>(ReturnT.FAIL_CODE, "repeate trigger job, logId:" + triggerParam.getLogId());
-		}
-
-		triggerLogIdSet.add(triggerParam.getLogId());
-		triggerQueue.add(triggerParam);
-        return ReturnT.SUCCESS;
-	}
-
-   //杀死调度任务
-	public void toStop(String stopReason) {
-		/**
-		 * Thread.interrupt只支持终止线程的阻塞状态(wait、join、sleep)，
-		 * 在阻塞出抛出InterruptedException异常,但是并不会终止运行的线程本身；
-		 * 所以需要注意，此处彻底销毁本线程，需要通过共享变量方式；
-		 */
-		this.toStop = true;
-		this.stopReason = stopReason;
-	}
-
-    //启动线程
-    @Override
-	public void run() {
-
-    	// init
-    	try {
-			handler.init();
-		} catch (Throwable e) {
-    		logger.error(e.getMessage(), e);
-		}
-
-		// 死循环知道停止
-		while(!toStop){
-			running = false;
-            //统计空闲次数 超过30次就终止线程
-			idleTimes++;
-
-            TriggerParam triggerParam = null;
-            try {
-				// to check toStop signal, we need cycle, so wo cannot use queue.take(), instand of poll(timeout)
-				triggerParam = triggerQueue.poll(3L, TimeUnit.SECONDS);
-				if (triggerParam!=null) {
-					running = true;
-					idleTimes = 0;
-					triggerLogIdSet.remove(triggerParam.getLogId());
-
-					// 创建日志文件，用于存储日志，日志异步上报。
-					String logFileName = XxlJobFileAppender.makeLogFileName(new Date(triggerParam.getLogDateTime()), triggerParam.getLogId());
-					XxlJobContext xxlJobContext = new XxlJobContext(
-							triggerParam.getJobId(),
-							triggerParam.getExecutorParams(),
-							logFileName,
-							triggerParam.getBroadcastIndex(),
-							triggerParam.getBroadcastTotal());
-
-					// 初始化上下文，使用InheritableThreadLocal保存
-					XxlJobContext.setXxlJobContext(xxlJobContext);
-
-					// execute
-					XxlJobHelper.log("<br>----------- xxl-job job execute start -----------<br>----------- Param:" + xxlJobContext.getJobParam());
-
-					if (triggerParam.getExecutorTimeout() > 0) {
-						// 设定调度过期时间
-						Thread futureThread = null;
-						try {
-							FutureTask<Boolean> futureTask = new FutureTask<Boolean>(new Callable<Boolean>() {
-								@Override
-								public Boolean call() throws Exception {
-
-									// init job context
-									XxlJobContext.setXxlJobContext(xxlJobContext);
-
-									handler.execute();
-									return true;
-								}
-							});
-							futureThread = new Thread(futureTask);
-							futureThread.start();
-
-							Boolean tempResult = futureTask.get(triggerParam.getExecutorTimeout(), TimeUnit.SECONDS);
-						} catch (TimeoutException e) {
-
-							XxlJobHelper.log("<br>----------- xxl-job job execute timeout");
-							XxlJobHelper.log(e);
-
-							// handle result
-							XxlJobHelper.handleTimeout("job execute timeout ");
-						} finally {
-							futureThread.interrupt();
-						}
-					} else {
-						//没有过期时间，直接执行
-						handler.execute();
-					}
-
-					// 处理执行结果
-					if (XxlJobContext.getXxlJobContext().getHandleCode() <= 0) {
-						XxlJobHelper.handleFail("job handle result lost.");
-					} else {
-						String tempHandleMsg = XxlJobContext.getXxlJobContext().getHandleMsg();
-						tempHandleMsg = (tempHandleMsg!=null&&tempHandleMsg.length()>50000)
-								?tempHandleMsg.substring(0, 50000).concat("...")
-								:tempHandleMsg;
-						XxlJobContext.getXxlJobContext().setHandleMsg(tempHandleMsg);
-					}
-					XxlJobHelper.log("<br>----------- xxl-job job execute end(finish) -----------<br>----------- Result: handleCode="
-							+ XxlJobContext.getXxlJobContext().getHandleCode()
-							+ ", handleMsg = "
-							+ XxlJobContext.getXxlJobContext().getHandleMsg()
-					);
-
-				} else {
-					if (idleTimes > 30) {
-						if(triggerQueue.size() == 0) {	// avoid concurrent trigger causes jobId-lost
-							XxlJobExecutor.removeJobThread(jobId, "excutor idel times over limit.");
-						}
-					}
-				}
-			} catch (Throwable e) {
-				if (toStop) {
-					XxlJobHelper.log("<br>----------- JobThread toStop, stopReason:" + stopReason);
-				}
-
-				// handle result
-				StringWriter stringWriter = new StringWriter();
-				e.printStackTrace(new PrintWriter(stringWriter));
-				String errorMsg = stringWriter.toString();
-
-				XxlJobHelper.handleFail(errorMsg);
-
-				XxlJobHelper.log("<br>----------- JobThread Exception:" + errorMsg + "<br>----------- xxl-job job execute end(error) -----------");
-			} finally {
-                if(triggerParam != null) {
-                    // callback handler info
-                    if (!toStop) {
-                        // 提交处理结果到队列中，等待上报
-                        TriggerCallbackThread.pushCallBack(new HandleCallbackParam(
-                        		triggerParam.getLogId(),
-								triggerParam.getLogDateTime(),
-								XxlJobContext.getXxlJobContext().getHandleCode(),
-								XxlJobContext.getXxlJobContext().getHandleMsg() )
-						);
-                    } else {
-                        // 提交处理结果到队列中，等待上报
-                        TriggerCallbackThread.pushCallBack(new HandleCallbackParam(
-                        		triggerParam.getLogId(),
-								triggerParam.getLogDateTime(),
-								XxlJobContext.HANDLE_CODE_FAIL,
-								stopReason + " [job running, killed]" )
-						);
-                    }
-                }
-            }
-        }
-
-		// callback trigger request in queue
-		while(triggerQueue !=null && triggerQueue.size()>0){
-			TriggerParam triggerParam = triggerQueue.poll();
-			if (triggerParam!=null) {
-				// is killed
-				TriggerCallbackThread.pushCallBack(new HandleCallbackParam(
-						triggerParam.getLogId(),
-						triggerParam.getLogDateTime(),
-						XxlJobContext.HANDLE_CODE_FAIL,
-						stopReason + " [job not executed, in the job queue, killed.]")
-				);
-			}
-		}
-
-		// destroy
-		try {
-			handler.destroy();
-		} catch (Throwable e) {
-			logger.error(e.getMessage(), e);
-		}
-
-		logger.info(">>>>>>>>>>> xxl-job JobThread stoped, hashCode:{}", Thread.currentThread());
-	}
-}
-```
-
-![实现类](./assets/Java任务调度-xxl-job-1645763302635.png)
-
-### 4.4.3 ExecutorBizImpl
-
-客户端在启动后，会在EmbedServer实例中启动一个netty专门接收从服务端发送来的请求。其中包括检查服务端心跳，job线程心跳，终止调度，读取日志以及JOB调度等，都是交给ExecutorBizImpl进行处理。这里主要介绍下任务调度的过程：
-
-```java
-public class ExecutorBizImpl implements ExecutorBiz {
-
-    @Override
-    public ReturnT<String> run(TriggerParam triggerParam) {
-        // 根据id获取 JOB的执行线程JobThread
-        JobThread jobThread = XxlJobExecutor.loadJobThread(triggerParam.getJobId());
-        // 获取jobThread内部的 jobHandler
-        IJobHandler jobHandler = jobThread!=null?jobThread.getHandler():null;
-        String removeOldReason = null;
-
-        // valid：jobHandler + jobThread
-        GlueTypeEnum glueTypeEnum = GlueTypeEnum.match(triggerParam.getGlueType());
-        if (GlueTypeEnum.BEAN == glueTypeEnum) {
-
-            // new jobhandler
-            IJobHandler newJobHandler = XxlJobExecutor.loadJobHandler(triggerParam.getExecutorHandler());
-
-            // valid old jobThread
-            if (jobThread!=null && jobHandler != newJobHandler) {
-                // change handler, need kill old thread
-                removeOldReason = "change jobhandler or glue type, and terminate the old job thread.";
-
-                jobThread = null;
-                jobHandler = null;
-            }
-
-            // valid handler
-            if (jobHandler == null) {
-                jobHandler = newJobHandler;
-                if (jobHandler == null) {
-                    return new ReturnT<String>(ReturnT.FAIL_CODE, "job handler [" + triggerParam.getExecutorHandler() + "] not found.");
-                }
-            }
-
-        } else if (GlueTypeEnum.GLUE_GROOVY == glueTypeEnum) {
-
-            // valid old jobThread
-            if (jobThread != null &&
-                    !(jobThread.getHandler() instanceof GlueJobHandler
-                        && ((GlueJobHandler) jobThread.getHandler()).getGlueUpdatetime()==triggerParam.getGlueUpdatetime() )) {
-                // change handler or gluesource updated, need kill old thread
-                removeOldReason = "change job source or glue type, and terminate the old job thread.";
-
-                jobThread = null;
-                jobHandler = null;
-            }
-
-            // valid handler
-            if (jobHandler == null) {
-                try {
-                    IJobHandler originJobHandler = GlueFactory.getInstance().loadNewInstance(triggerParam.getGlueSource());
-                    jobHandler = new GlueJobHandler(originJobHandler, triggerParam.getGlueUpdatetime());
-                } catch (Exception e) {
-                    logger.error(e.getMessage(), e);
-                    return new ReturnT<String>(ReturnT.FAIL_CODE, e.getMessage());
-                }
-            }
-        } else if (glueTypeEnum!=null && glueTypeEnum.isScript()) {
-
-            // valid old jobThread
-            if (jobThread != null &&
-                    !(jobThread.getHandler() instanceof ScriptJobHandler
-                            && ((ScriptJobHandler) jobThread.getHandler()).getGlueUpdatetime()==triggerParam.getGlueUpdatetime() )) {
-                // change script or gluesource updated, need kill old thread
-                removeOldReason = "change job source or glue type, and terminate the old job thread.";
-
-                jobThread = null;
-                jobHandler = null;
-            }
-
-            // valid handler
-            if (jobHandler == null) {
-                jobHandler = new ScriptJobHandler(triggerParam.getJobId(), triggerParam.getGlueUpdatetime(), triggerParam.getGlueSource(), GlueTypeEnum.match(triggerParam.getGlueType()));
-            }
-        } else {
-            return new ReturnT<String>(ReturnT.FAIL_CODE, "glueType[" + triggerParam.getGlueType() + "] is not valid.");
-        }
-
-        // executor block strategy
-        if (jobThread != null) {
-            ExecutorBlockStrategyEnum blockStrategy = ExecutorBlockStrategyEnum.match(triggerParam.getExecutorBlockStrategy(), null);
-            if (ExecutorBlockStrategyEnum.DISCARD_LATER == blockStrategy) {
-                // discard when running
-                if (jobThread.isRunningOrHasQueue()) {
-                    return new ReturnT<String>(ReturnT.FAIL_CODE, "block strategy effect："+ExecutorBlockStrategyEnum.DISCARD_LATER.getTitle());
-                }
-            } else if (ExecutorBlockStrategyEnum.COVER_EARLY == blockStrategy) {
-                // kill running jobThread
-                if (jobThread.isRunningOrHasQueue()) {
-                    removeOldReason = "block strategy effect：" + ExecutorBlockStrategyEnum.COVER_EARLY.getTitle();
-
-                    jobThread = null;
-                }
-            } else {
-                // just queue trigger
-            }
-        }
-
-        // replace thread (new or exists invalid)
-        if (jobThread == null) {
-            jobThread = XxlJobExecutor.registJobThread(triggerParam.getJobId(), jobHandler, removeOldReason);
-        }
-
-        // push data to queue
-        ReturnT<String> pushResult = jobThread.pushTriggerQueue(triggerParam);
-        return pushResult;
-    }
-}
-```
-
-## 4.5 几个表格作用
-
-xxl_job_group：任务分组。一个执行器算作一个组。每组下面会记录对应的实例地址。
-![任务组](./assets/Java任务调度-1645696899152.png)
-xxl_job_info：具体的任务信息。
-xxl_job_lock：分布式锁
-xxl_job_log：日志
-xxl_job_log_report：调度统计
-xxl_job_logglue： 可以记录GLUE模式代码历史版本
-xxl_job_registry：注册信息表，每一台机器注册上来，都会记录一条记录。
-![注册表](./assets/Java任务调度-1645696584108.png)
-xxl_job_user：用户表
-
-其中xxl_job_group，xxl_job_info，xxl_job_lock是调度器的关键，其他的是起到支撑辅助作用。
-
-# 5 Quartz
-
-## 5.1 什么是 Quartz
-
-从 [Quartz官网](http://www.quartz-scheduler.org/) 简介可以知道，
-Quartz 是一个开源的任务调度框架，可以用于单体应用，也可以用于大型的电子商务平台，支持成千上万的任务。
-
-## 5.1 Quartz 简单demo
-
-新建一个maven项目，引入依赖
-
-```xml
-<dependency>
-   <groupId>org.quartz-scheduler</groupId>
-   <artifactId>quartz</artifactId>
-   <version>2.3.1</version>
-</dependency>
-```
-
-````java
-public class Application {
-    public static void main(String[] args) {
-        try {
-            Scheduler scheduler = StdSchedulerFactory.getDefaultScheduler();
-            scheduler.start();
-            //定义一个工作对象 设置工作名称与组名
-            JobDetail job = JobBuilder.newJob(HelloJob.class).withIdentity("job41","group1").build();
-            //定义一个触发器 简单Trigger 设置工作名称与组名 5秒触发一次
-            Trigger trigger = TriggerBuilder.newTrigger().withIdentity("trigger1","group1").startNow().withSchedule(SimpleScheduleBuilder.repeatSecondlyForever(5)).build();
-            //设置工作 与触发器
-            scheduler.scheduleJob(job, trigger);
-//            scheduler.shutdown();
-        } catch (SchedulerException se) {
-            se.printStackTrace();
-        }
-    }
-}
-
-````
-
-Scheduler 是一个接口定义了一系列提交job的方法。
-其实现类如下:
-![QuartzScheduler实现类](./assets/JAVA任务调度技术-1645528734979.png)
-
-查看 StdScheduler 本质上是一个代理类，代理了 QuartzScheduler 类的所有方法。
-
-挑选一个方法来看：
-
-```java
-public class QuartzScheduler implements RemotableQuartzScheduler {
-    //存储job
-   private QuartzSchedulerResources resources;
-
-   public Date scheduleJob(JobDetail jobDetail,
-                           Trigger trigger) throws SchedulerException {
-       //省略校验
-      OperableTrigger trig = (OperableTrigger) trigger;
-
-      if (trigger.getJobKey() == null) {
-         trig.setJobKey(jobDetail.getKey());
-      } else if (!trigger.getJobKey().equals(jobDetail.getKey())) {
-         throw new SchedulerException(
-                 "Trigger does not reference given job!");
-      }
-
-      trig.validate();
-
-      Calendar cal = null;
-      if (trigger.getCalendarName() != null) {
-         cal = resources.getJobStore().retrieveCalendar(trigger.getCalendarName());
-      }
-      Date ft = trig.computeFirstFireTime(cal);
-
-      if (ft == null) {
-         throw new SchedulerException(
-                 "Based on configured schedule, the given trigger '" + trigger.getKey() + "' will never fire.");
-      }
-
-      resources.getJobStore().storeJobAndTrigger(jobDetail, trig);
-      notifySchedulerListenersJobAdded(jobDetail);
-      notifySchedulerThread(trigger.getNextFireTime().getTime());
-      notifySchedulerListenersSchduled(trigger);
-
-      return ft;
-   }
-
-   //start方法
-   public void start() throws SchedulerException {
-
-      if (shuttingDown|| closed) {
-         throw new SchedulerException(
-                 "The Scheduler cannot be restarted after shutdown() has been called.");
-      }
-
-      // QTZ-212 : calling new schedulerStarting() method on the listeners
-      // right after entering start()
-      notifySchedulerListenersStarting();
-
-      if (initialStart == null) {
-         initialStart = new Date();
-         //启动了线程
-         this.resources.getJobStore().schedulerStarted();
-         startPlugins();
-      } else {
-         resources.getJobStore().schedulerResumed();
-      }
-
-      schedThread.togglePause(false);
-
-      getLog().info(
-              "Scheduler " + resources.getUniqueIdentifier() + " started.");
-
-      notifySchedulerListenersStarted();
-   }
-}
-```
-
-可以看到存储和触发的代码
-
-> resources.getJobStore().storeJobAndTrigger(jobDetail, trig);
-
-其中resources.getJobStore() 为 JobStore 实例。用于存储job和triger提供给 QuartzScheduler 使用。
-
-## JOB Store
-
-![jobstore实现类](./assets/JAVA任务调度技术-1645529673682.png)
-
-RAMJobStore 内存行存储，单机情况下默认。
-JDBC JobStore 数据库。
-查看 RAMJobStore 。
-
-```java
-public class RAMJobStore implements JobStore {
-
-    /*
-     * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-     * 
-     * Data members.
-     * 
-     * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-     */
-
-    protected HashMap<JobKey, JobWrapper> jobsByKey = new HashMap<JobKey, JobWrapper>(1000);
-
-    protected HashMap<TriggerKey, TriggerWrapper> triggersByKey = new HashMap<TriggerKey, TriggerWrapper>(1000);
-
-    protected HashMap<String, HashMap<JobKey, JobWrapper>> jobsByGroup = new HashMap<String, HashMap<JobKey, JobWrapper>>(25);
-
-    protected HashMap<String, HashMap<TriggerKey, TriggerWrapper>> triggersByGroup = new HashMap<String, HashMap<TriggerKey, TriggerWrapper>>(25);
-
-    protected TreeSet<TriggerWrapper> timeTriggers = new TreeSet<TriggerWrapper>(new TriggerWrapperComparator());
-
-    protected HashMap<String, Calendar> calendarsByName = new HashMap<String, Calendar>(25);
-
-    protected Map<JobKey, List<TriggerWrapper>> triggersByJob = new HashMap<JobKey, List<TriggerWrapper>>(1000);
-
-    protected final Object lock = new Object();
-
-    protected HashSet<String> pausedTriggerGroups = new HashSet<String>();
-
-    protected HashSet<String> pausedJobGroups = new HashSet<String>();
-
-    protected HashSet<JobKey> blockedJobs = new HashSet<JobKey>();
-  
-    protected long misfireThreshold = 5000l;
-
-    protected SchedulerSignaler signaler;
-
-    //获取下一个任务
-   public List<OperableTrigger> acquireNextTriggers(long noLaterThan, int maxCount, long timeWindow) {
-      synchronized (lock) {
-         List<OperableTrigger> result = new ArrayList<OperableTrigger>();
-         Set<JobKey> acquiredJobKeysForNoConcurrentExec = new HashSet<JobKey>();
-         Set<TriggerWrapper> excludedTriggers = new HashSet<TriggerWrapper>();
-         long batchEnd = noLaterThan;
-
-         // return empty list if store has no triggers.
-         if (timeTriggers.size() == 0)
-            return result;
-
-         while (true) {
-            TriggerWrapper tw;
-
-            try {
-               tw = timeTriggers.first();
-               if (tw == null)
-                  break;
-               timeTriggers.remove(tw);
-            } catch (java.util.NoSuchElementException nsee) {
-               break;
-            }
-
-            if (tw.trigger.getNextFireTime() == null) {
-               continue;
-            }
-
-            if (applyMisfire(tw)) {
-               if (tw.trigger.getNextFireTime() != null) {
-                  timeTriggers.add(tw);
-               }
-               continue;
-            }
-
-            if (tw.getTrigger().getNextFireTime().getTime() > batchEnd) {
-               timeTriggers.add(tw);
-               break;
-            }
-
-            // If trigger's job is set as @DisallowConcurrentExecution, and it has already been added to result, then
-            // put it back into the timeTriggers set and continue to search for next trigger.
-            JobKey jobKey = tw.trigger.getJobKey();
-            JobDetail job = jobsByKey.get(tw.trigger.getJobKey()).jobDetail;
-            if (job.isConcurrentExectionDisallowed()) {
-               if (acquiredJobKeysForNoConcurrentExec.contains(jobKey)) {
-                  excludedTriggers.add(tw);
-                  continue; // go to next trigger in store.
-               } else {
-                  acquiredJobKeysForNoConcurrentExec.add(jobKey);
-               }
-            }
-
-            tw.state = TriggerWrapper.STATE_ACQUIRED;
-            tw.trigger.setFireInstanceId(getFiredTriggerRecordId());
-            OperableTrigger trig = (OperableTrigger) tw.trigger.clone();
-            if (result.isEmpty()) {
-               batchEnd = Math.max(tw.trigger.getNextFireTime().getTime(), System.currentTimeMillis()) + timeWindow;
-            }
-            result.add(trig);
-            if (result.size() == maxCount)
-               break;
-         }
-
-         // If we did excluded triggers to prevent ACQUIRE state due to DisallowConcurrentExecution, we need to add them back to store.
-         if (excludedTriggers.size() > 0)
-            timeTriggers.addAll(excludedTriggers);
-         return result;
-      }
-   }
-}
-```
-
-从以上源码可知 RAMJobStore 是存储job以及相关参数的地方。
-其中特别注意的是timeTriggers属性，其使用TreeSet来保存，这个是实现类似Timer优先队列的作用。
-
-QuartzSchedulerThread 的run方法，就是去获取任务的地方。
-
-```java
-public class QuartzSchedulerThread extends Thread {
-
-    /**
-     * <p>
-     * The main processing loop of the <code>QuartzSchedulerThread</code>.
-     * </p>
-     */
-    @Override
-    public void run() {
-        int acquiresFailed = 0;
-
-        while (!halted.get()) {
-            try {
-                // check if we're supposed to pause...
-                synchronized (sigLock) {
-                    while (paused && !halted.get()) {
-                        try {
-                            // wait until togglePause(false) is called...
-                            sigLock.wait(1000L);
-                        } catch (InterruptedException ignore) {
-                        }
-
-                        // reset failure counter when paused, so that we don't
-                        // wait again after unpausing
-                        acquiresFailed = 0;
-                    }
-
-                    if (halted.get()) {
-                        break;
-                    }
-                }
-
-                // wait a bit, if reading from job store is consistently
-                // failing (e.g. DB is down or restarting)..
-                if (acquiresFailed > 1) {
-                    try {
-                        long delay = computeDelayForRepeatedErrors(qsRsrcs.getJobStore(), acquiresFailed);
-                        Thread.sleep(delay);
-                    } catch (Exception ignore) {
-                    }
-                }
-
-                int availThreadCount = qsRsrcs.getThreadPool().blockForAvailableThreads();
-                if(availThreadCount > 0) { // will always be true, due to semantics of blockForAvailableThreads...
-
-                    List<OperableTrigger> triggers;
-
-                    long now = System.currentTimeMillis();
-
-                    clearSignaledSchedulingChange();
-                    try {
-                        triggers = qsRsrcs.getJobStore().acquireNextTriggers(
-                                now + idleWaitTime, Math.min(availThreadCount, qsRsrcs.getMaxBatchSize()), qsRsrcs.getBatchTimeWindow());
-                        acquiresFailed = 0;
-                        if (log.isDebugEnabled())
-                            log.debug("batch acquisition of " + (triggers == null ? 0 : triggers.size()) + " triggers");
-                    } catch (JobPersistenceException jpe) {
-                        if (acquiresFailed == 0) {
-                            qs.notifySchedulerListenersError(
-                                "An error occurred while scanning for the next triggers to fire.",
-                                jpe);
-                        }
-                        if (acquiresFailed < Integer.MAX_VALUE)
-                            acquiresFailed++;
-                        continue;
-                    } catch (RuntimeException e) {
-                        if (acquiresFailed == 0) {
-                            getLog().error("quartzSchedulerThreadLoop: RuntimeException "
-                                    +e.getMessage(), e);
-                        }
-                        if (acquiresFailed < Integer.MAX_VALUE)
-                            acquiresFailed++;
-                        continue;
-                    }
-
-                    if (triggers != null && !triggers.isEmpty()) {
-
-                        now = System.currentTimeMillis();
-                        long triggerTime = triggers.get(0).getNextFireTime().getTime();
-                        long timeUntilTrigger = triggerTime - now;
-                        while(timeUntilTrigger > 2) {
-                            synchronized (sigLock) {
-                                if (halted.get()) {
-                                    break;
-                                }
-                                if (!isCandidateNewTimeEarlierWithinReason(triggerTime, false)) {
-                                    try {
-                                        // we could have blocked a long while
-                                        // on 'synchronize', so we must recompute
-                                        now = System.currentTimeMillis();
-                                        timeUntilTrigger = triggerTime - now;
-                                        if(timeUntilTrigger >= 1)
-                                            sigLock.wait(timeUntilTrigger);
-                                    } catch (InterruptedException ignore) {
-                                    }
-                                }
-                            }
-                            if(releaseIfScheduleChangedSignificantly(triggers, triggerTime)) {
-                                break;
-                            }
-                            now = System.currentTimeMillis();
-                            timeUntilTrigger = triggerTime - now;
-                        }
-
-                        // this happens if releaseIfScheduleChangedSignificantly decided to release triggers
-                        if(triggers.isEmpty())
-                            continue;
-
-                        // set triggers to 'executing'
-                        List<TriggerFiredResult> bndles = new ArrayList<TriggerFiredResult>();
-
-                        boolean goAhead = true;
-                        synchronized(sigLock) {
-                            goAhead = !halted.get();
-                        }
-                        if(goAhead) {
-                            try {
-                                List<TriggerFiredResult> res = qsRsrcs.getJobStore().triggersFired(triggers);
-                                if(res != null)
-                                    bndles = res;
-                            } catch (SchedulerException se) {
-                                qs.notifySchedulerListenersError(
-                                        "An error occurred while firing triggers '"
-                                                + triggers + "'", se);
-                                //QTZ-179 : a problem occurred interacting with the triggers from the db
-                                //we release them and loop again
-                                for (int i = 0; i < triggers.size(); i++) {
-                                    qsRsrcs.getJobStore().releaseAcquiredTrigger(triggers.get(i));
-                                }
-                                continue;
-                            }
-
-                        }
-
-                        for (int i = 0; i < bndles.size(); i++) {
-                            TriggerFiredResult result =  bndles.get(i);
-                            TriggerFiredBundle bndle =  result.getTriggerFiredBundle();
-                            Exception exception = result.getException();
-
-                            if (exception instanceof RuntimeException) {
-                                getLog().error("RuntimeException while firing trigger " + triggers.get(i), exception);
-                                qsRsrcs.getJobStore().releaseAcquiredTrigger(triggers.get(i));
-                                continue;
-                            }
-
-                            // it's possible to get 'null' if the triggers was paused,
-                            // blocked, or other similar occurrences that prevent it being
-                            // fired at this time...  or if the scheduler was shutdown (halted)
-                            if (bndle == null) {
-                                qsRsrcs.getJobStore().releaseAcquiredTrigger(triggers.get(i));
-                                continue;
-                            }
-
-                            JobRunShell shell = null;
-                            try {
-                                shell = qsRsrcs.getJobRunShellFactory().createJobRunShell(bndle);
-                                shell.initialize(qs);
-                            } catch (SchedulerException se) {
-                                qsRsrcs.getJobStore().triggeredJobComplete(triggers.get(i), bndle.getJobDetail(), CompletedExecutionInstruction.SET_ALL_JOB_TRIGGERS_ERROR);
-                                continue;
-                            }
-
-                            if (qsRsrcs.getThreadPool().runInThread(shell) == false) {
-                                // this case should never happen, as it is indicative of the
-                                // scheduler being shutdown or a bug in the thread pool or
-                                // a thread pool being used concurrently - which the docs
-                                // say not to do...
-                                getLog().error("ThreadPool.runInThread() return false!");
-                                qsRsrcs.getJobStore().triggeredJobComplete(triggers.get(i), bndle.getJobDetail(), CompletedExecutionInstruction.SET_ALL_JOB_TRIGGERS_ERROR);
-                            }
-
-                        }
-
-                        continue; // while (!halted)
-                    }
-                } else { // if(availThreadCount > 0)
-                    // should never happen, if threadPool.blockForAvailableThreads() follows contract
-                    continue; // while (!halted)
-                }
-
-                long now = System.currentTimeMillis();
-                long waitTime = now + getRandomizedIdleWaitTime();
-                long timeUntilContinue = waitTime - now;
-                synchronized(sigLock) {
-                    try {
-                      if(!halted.get()) {
-                        // QTZ-336 A job might have been completed in the mean time and we might have
-                        // missed the scheduled changed signal by not waiting for the notify() yet
-                        // Check that before waiting for too long in case this very job needs to be
-                        // scheduled very soon
-                        if (!isScheduleChanged()) {
-                          sigLock.wait(timeUntilContinue);
-                        }
-                      }
-                    } catch (InterruptedException ignore) {
-                    }
-                }
-
-            } catch(RuntimeException re) {
-                getLog().error("Runtime error occurred in main trigger firing loop.", re);
-            }
-        } // while (!halted)
-
-        // drop references to scheduler stuff to aid garbage collection...
-        qs = null;
-        qsRsrcs = null;
-    }
-
-  
-
-  
-
-} 
-```
-
-5.2 几个概念
-
-Trigger
-![trigger实现](./assets/Java任务调度-Quartz-1645780446974.png)
-
-# 6 Elastic-Job
-
-待续
-
-# 7 Apache DolphinScheduler
-
-待续
-
-# 总结
-
-![调度框架对比](./assets/JAVA任务调度技术-1645525979146.png)
-
-[Java中常见的几种任务调度框架对比](https://blog.csdn.net/miaomiao19971215/article/details/105634418?spm=1001.2101.3001.6650.2&utm_medium=distribute.pc_relevant.none-task-blog-2%7Edefault%7EBlogCommendFromBaidu%7ERate-2.pc_relevant_default&depth_1-utm_source=distribute.pc_relevant.none-task-blog-2%7Edefault%7EBlogCommendFromBaidu%7ERate-2.pc_relevant_default&utm_relevant_index=5)
-
-# 引用
-
-1. [Spring Job？Quartz？XXL-Job？年轻人才做选择，艿艿全莽~
-   ](https://mp.weixin.qq.com/s?__biz=MzUzMTA2NTU2Ng==&mid=2247490679&idx=1&sn=25374dbdcca95311d41be5d7b7db454d&chksm=fa4963c6cd3eead055bb9cd10cca13224bb35d0f7373a27aa22a55495f71e24b8273a7603314&scene=27#wechat_redirect)
-2. [Timer与TimerTask的真正原理&amp;使用介绍](https://blog.csdn.net/xieyuooo/article/details/8607220)
-3. [深入 DelayQueue 内部实现](https://www.zybuluo.com/mikumikulch/note/712598)
-4. [PriorityQueue详解](https://www.jianshu.com/p/f1fd9b82cb72)
-5. [Java优先级队列DelayedWorkQueue原理分析](https://www.jianshu.com/p/587901245c95)
-6. [【Java基础】JAVA中优先队列详解](https://www.cnblogs.com/satire/p/14919342.html)
-7. [quartz （从原理到应用）详解篇](https://blog.csdn.net/lkl_csdn/article/details/73613033)
-8. [《分布式任务调度平台XXL-JOB》-官方文档](https://www.xuxueli.com/xxl-job/)
-9. [平衡二叉堆](https://blog.csdn.net/weixin_33704234/article/details/91899391)
-10. [聊聊Java进阶之并发基础技术—线程池剖析](https://www.jianshu.com/p/41c9db9862be)
-11. [Java中常见的几种任务调度框架对比](https://blog.csdn.net/miaomiao19971215/article/details/105634418?spm=1001.2101.3001.6650.2&utm_medium=distribute.pc_relevant.none-task-blog-2%7Edefault%7EBlogCommendFromBaidu%7ERate-2.pc_relevant_default&depth_1-utm_source=distribute.pc_relevant.none-task-blog-2%7Edefault%7EBlogCommendFromBaidu%7ERate-2.pc_relevant_default&utm_relevant_index=5)
-12. [Quartz 源码解析(一) —— 基本介绍](https://www.jianshu.com/p/3f77224ad9d4)
+基本的思想还是与 ScheduledExecutorService 想类似的。在默认情况下也是使用ScheduledExecutorService作为任务的处理器。
