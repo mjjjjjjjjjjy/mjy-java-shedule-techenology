@@ -1,4 +1,4 @@
-<div style="text-align: center;"><span style="font-size: xxx-large" >JAVA 任务调度技术</span></div>
+<div style="text-align: center;"><span style="font-size: xxx-large" >JAVA 常用任务调度技术</span></div>
 
 # 前言
 
